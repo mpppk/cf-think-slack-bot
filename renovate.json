@@ -1,0 +1,38 @@
+{
+	"$schema": "https://docs.renovatebot.com/renovate-schema.json",
+	"extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+	"packageRules": [
+		{
+			"description": "devDependencies の patch/minor は無人マージする。ただし公開直後のリリースは待つ: automerge は人の目を通らないので、侵害されたリリースが CI 通過と同時に main へ着地し、そのまま production へデプロイされる。3日置けば取り下げ・yank が間に合う。レビューが要る更新(下のグループ)には掛けない。",
+			"matchDepTypes": ["devDependencies"],
+			"matchUpdateTypes": ["patch", "minor"],
+			"automerge": true,
+			"minimumReleaseAge": "3 days"
+		},
+		{
+			"description": "Cloudflare ツールチェーンは足並みを揃えないと壊れる(wrangler 単独更新で workerd の互換や生成される設定が食い違う)。1つのPRにまとめ、automerge を外して人手のレビューを必須にする。wrangler を上げると `bun run check:types` が生成物の再生成を要求して落ちるので、その対応も人が見る。",
+			"matchPackageNames": ["wrangler", "@cloudflare/vitest-pool-workers"],
+			"groupName": "cloudflare workers toolchain",
+			"automerge": false
+		},
+		{
+			"description": "Think と Chat SDK adapter はこのボットの土台で、どちらも 0.x/若い版のため minor が破壊的でありうる。ADR 0003 / 0017 / 0021 は特定バージョンで確認した事実(利用可能なtool、adapter が持つ重複排除の一覧)に依存しているので、更新時は ADR の追随確認まで人が行う。",
+			"matchPackageNames": ["@cloudflare/think", "@chat-adapter/slack"],
+			"groupName": "think / chat-sdk",
+			"automerge": false
+		},
+		{
+			"description": "packageManager (bun) の更新。CI の `Verify pinned bun version` と Workers の実行環境に同時に効くので人手で見る。",
+			"matchDepTypes": ["packageManager"],
+			"automerge": false
+		}
+	],
+	"lockFileMaintenance": {
+		"enabled": true,
+		"schedule": ["before 5am on monday"]
+	},
+	"osvVulnerabilityAlerts": true,
+	"vulnerabilityAlerts": {
+		"labels": ["security"]
+	}
+}

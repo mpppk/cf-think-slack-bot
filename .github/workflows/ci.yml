@@ -1,0 +1,346 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    # ラベルの付け外しでプレビューのデプロイ/巻き戻しが動く(ADR 0020)。
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+# 最小権限。ジョブ側で必要なものだけ足す。
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # 対象の Worker とプレビューURL。ここを直したら README も直す。
+  PREVIEW_URL: https://cf-think-slack-bot-preview.niboshi.workers.dev
+  PRODUCTION_URL: https://cf-think-slack-bot.niboshi.workers.dev
+  # プレビューを1本のPRに占有させるラベル
+  PREVIEW_LABEL: deploy-preview
+
+jobs:
+  ci:
+    name: Type Check, Lint & Test
+    runs-on: ubuntu-latest
+    # 既定(360分)のままだと vitest のハング等で最長6時間ランナーを占有する。
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gitleaks が PR の diff 範囲(base..head)を取るために全履歴が要る。
+          fetch-depth: 0
+
+      # ワークフローYAML自体の検証。設定ミス(on の typo・存在しない式・型違い)は
+      # 他のステップが全部緑でもワークフローが実行されず気づけない。
+      # Go 製の単体バイナリを落とすだけで依存インストールが要らないので最初に置く。
+      - name: Validate workflow files (actionlint)
+        uses: rhysd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+
+      # コミットに秘密が混入していないかを差分単位で検査する。
+      # このリポジトリは Slack Bot Token / Signing Secret / OpenRouter / Tavily の
+      # 4つを扱い、ローカルでは .dev.vars に置く運用なので混入の窓が広い。
+      # `xoxb-` 等は gitleaks の標準ルールが検出する。
+      #
+      # **PRでは base..head の全コミットを走査する**（tip だけではない）。つまり
+      # 一度混入させると、後のコミットで消しても検出され続ける。直すには
+      # そのコミット自体を履歴から消す（自分のブランチなら squash / rebase）。
+      #
+      # テストのダミー値でも `generic-api-key` がエントロピーで拾う。本物らしい
+      # 形の文字列を置かないこと（allowlist で黙らせる前に値の側を直す）。
+      - name: Scan for secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # bun のバージョンは package.json の packageManager が唯一の真実の源。
+          # 未指定だと毎回 latest が入り、bun 側のリグレッションでリポジトリ無変更のまま
+          # CI とデプロイが同時に壊れうる。Renovate が packageManager の更新PRを出す。
+          bun-version-file: package.json
+
+      # setup-bun はバイナリしかキャッシュしないので、パッケージ側は自分でキャッシュする。
+      - name: Cache bun packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      # setup-bun は bun-version-file の解決に失敗しても既定(latest)へ**黙って**
+      # フォールバックする。固定が効かなくなったことに気づけるよう突き合わせる。
+      - name: Verify pinned bun version
+        run: |
+          # shellcheck disable=SC2016 # bun -e の中身は JS。$ はシェル展開ではない
+          bun -e '
+            const want = (await Bun.file("package.json").json()).packageManager.replace("bun@", "");
+            if (Bun.version !== want) {
+              console.error(`bun version mismatch: packageManager=${want} running=${Bun.version}`);
+              process.exit(1);
+            }
+            console.log(`bun ${Bun.version} (pinned via packageManager)`);
+          '
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check dependency vulnerabilities (bun audit)
+        run: bun run check:audit
+
+      # シークレット名の3箇所一致(宣言/ローカル/CIの同期)と、テストの命名規約を見る。
+      # どちらも「ズレていても他が全部緑になる」種類の壊れ方をする(scripts の説明を参照)。
+      - name: Check repository conventions
+        run: bun run check:conventions
+
+      # コミット済みの worker-configuration.d.ts が wrangler.jsonc と揃っているかを見る。
+      # バインディングを足して再生成を忘れると `Env` 型が古いまま**typecheck は緑になり**、
+      # 未型付け・存在しないバインディングへのアクセスが実行時まで漏れる。
+      # typecheck より前に置く(型が古いままの typecheck は「緑だが信用できない」)。
+      - name: Check generated Worker types are fresh
+        run: bun run check:types
+        env:
+          WRANGLER_SEND_METRICS: "false"
+
+      - name: Type check
+        run: bun run typecheck
+
+      - name: Lint & Format check (Biome)
+        run: bun run check
+
+      # ADR 0022: workerd(miniflare)実環境で走らせる。
+      - name: Test
+        run: bun run test
+
+      # build が通っても deploy で落ちる非互換を検出する。dry-run は生成された設定を
+      # 実際に読んでバンドル・バインディングを解決するが、アップロードしないため
+      # 認証情報を必要としない。env ごとにバインディングが違うので両方見る。
+      - name: Verify deploy config (production, dry-run)
+        run: bun run check:deploy
+        env:
+          WRANGLER_SEND_METRICS: "false"
+
+      - name: Verify deploy config (preview, dry-run)
+        run: bun run check:deploy:preview
+        env:
+          WRANGLER_SEND_METRICS: "false"
+
+  # ---------------------------------------------------------------------------
+  # プレビューへのデプロイ。`deploy-preview` ラベルが付いたPRだけが対象(ADR 0020)。
+  #
+  # プレビューは固定URLの Worker 1本しかない。Durable Object を持つ Worker には
+  # Cloudflare が per-version のプレビューURLを発行しないうえ、Slack App の
+  # Request URL は1つしか持てないので、ブランチごとのプレビューという選択肢が無い。
+  # したがって「今プレビューを占有しているPRは1本」をラベルで表明し、
+  # 実際に1本であることを下の排他チェックで機械的に保証する。
+  # ---------------------------------------------------------------------------
+  deploy-preview:
+    name: Deploy to preview
+    needs: ci
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action != 'unlabeled' &&
+      contains(github.event.pull_request.labels.*.name, 'deploy-preview') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # preview 環境のシークレットはこのジョブからしか読めない。
+    environment:
+      name: preview
+      url: https://cf-think-slack-bot-preview.niboshi.workers.dev
+    concurrency:
+      # デプロイの途中でキャンセルしない(secret 同期とデプロイの間で止まると
+      # 中途半端な状態が残る)。後続は待たせる。
+      group: deploy-preview
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      # 排他チェックが open PR を検索するために要る
+      pull-requests: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ラベルは複数のPRに付けられるので、ラベルだけでは「後勝ち」が残る。
+      # 実際に1本であることをここで確かめ、2本以上なら**デプロイせずに落とす**。
+      - name: Ensure this PR owns the preview environment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          LABEL: ${{ env.PREVIEW_LABEL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          others="$(gh pr list --repo "$REPO" --state open --label "$LABEL" \
+            --json number --jq "[.[] | select(.number != $PR_NUMBER) | .number] | join(\", \")")"
+          if [ -n "$others" ]; then
+            echo "::error::プレビューは1本のPRが占有します。'$LABEL' が付いている他のPR: #${others}。先にそちらのラベルを外してください。"
+            exit 1
+          fi
+          echo "プレビューは #${PR_NUMBER} が占有しています"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # シークレットの正は GitHub Secrets に置き、Worker 側は導出物にする(ADR 0025)。
+      # `wrangler secret put` を手で叩く運用だと、rotate のたびに Slack / Worker /
+      # GitHub の3箇所を更新することになり、ズレたときに
+      # 「CIは緑・デプロイは成功・Slack からは 401」になる。
+      # 値はシェルの引数ではなく env 経由で渡す(GitHub のマスクを効かせ、
+      # プロセス一覧やログに出さないため)。
+      - name: Sync secrets to the preview Worker
+        env:
+          WRANGLER_SEND_METRICS: "false"
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg SLACK_BOT_TOKEN "$SLACK_BOT_TOKEN" \
+            --arg SLACK_SIGNING_SECRET "$SLACK_SIGNING_SECRET" \
+            --arg OPENROUTER_API_KEY "$OPENROUTER_API_KEY" \
+            --arg TAVILY_API_KEY "$TAVILY_API_KEY" \
+            '$ARGS.named' \
+            | bunx wrangler secret bulk --env preview
+
+      - name: Deploy
+        env:
+          WRANGLER_SEND_METRICS: "false"
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bun run deploy:preview
+
+      # デプロイ済み環境を外形から叩く。challenge まで通すので、
+      # **preview Worker の signing secret が preview Slack App の実物と一致しているか**
+      # がここで分かる(`wrangler secret list` は名前しか返さない)。
+      # secret が無ければスキップせず落ちる(scripts/smoke.sh)。
+      - name: Smoke test
+        env:
+          SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+        run: bash scripts/smoke.sh "$PREVIEW_URL" --with-challenge
+
+  # ---------------------------------------------------------------------------
+  # ラベルを外したら、プレビューを main の内容に戻す。
+  # 外したPRの内容がプレビューに残り続けると、次に誰かが触ったときに
+  # 「何がデプロイされているか分からない」状態になる。
+  # ---------------------------------------------------------------------------
+  restore-preview:
+    name: Restore preview to main
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'unlabeled' &&
+      github.event.label.name == 'deploy-preview'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: preview
+      url: https://cf-think-slack-bot-preview.niboshi.workers.dev
+    concurrency:
+      group: deploy-preview
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Deploy main to preview
+        env:
+          WRANGLER_SEND_METRICS: "false"
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bun run deploy:preview
+
+      - name: Smoke test
+        env:
+          SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+        run: bash scripts/smoke.sh "$PREVIEW_URL" --with-challenge
+
+  # ---------------------------------------------------------------------------
+  # 本番へのデプロイ。main への push だけ。
+  #
+  # スモークは challenge を**通さない**。通すには production Slack App の
+  # signing secret を GitHub に置く必要があり、preview App と違って
+  # 漏えい時に本番botへのなりすましが成立するため(ADR 0025)。
+  # ---------------------------------------------------------------------------
+  deploy-production:
+    name: Deploy to production
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://cf-think-slack-bot.niboshi.workers.dev
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Sync secrets to the production Worker
+        env:
+          WRANGLER_SEND_METRICS: "false"
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg SLACK_BOT_TOKEN "$SLACK_BOT_TOKEN" \
+            --arg SLACK_SIGNING_SECRET "$SLACK_SIGNING_SECRET" \
+            --arg OPENROUTER_API_KEY "$OPENROUTER_API_KEY" \
+            --arg TAVILY_API_KEY "$TAVILY_API_KEY" \
+            '$ARGS.named' \
+            | bunx wrangler secret bulk --env=""
+
+      - name: Deploy
+        env:
+          WRANGLER_SEND_METRICS: "false"
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bun run deploy
+
+      - name: Smoke test
+        run: bash scripts/smoke.sh "$PRODUCTION_URL"
