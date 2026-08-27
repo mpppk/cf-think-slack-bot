@@ -1,6 +1,6 @@
 # compaction は configureSession() で登録する
 
-Web検索のtool_resultはSessionに永続するが、モデル上限に近づいたら古いtool_resultから要約してトークンを回収する。要約は単純削除ではなくLLMによる要約とし、`addCompaction()` でoverlayとして保存する。閾値と要約関数は `configureSession()` で `onCompaction()` + `compactAfter(threshold)` として明示的に登録する。
+ツールのtool_result（ADR 0017）はSessionに永続するが、モデル上限に近づいたら古いtool_resultから要約してトークンを回収する。要約は単純削除ではなくLLMによる要約とし、`addCompaction()` でoverlayとして保存する。閾値と要約関数は `configureSession()` で `onCompaction()` + `compactAfter(threshold)` として明示的に登録する。
 
 当初は「Thinkのデフォルトcompactionに委譲し、自前実装しない」と決めていたが、これは事実に反していたため撤回した。
 
