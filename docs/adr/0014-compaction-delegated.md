@@ -1,0 +1,3 @@
+# CompactionはThinkデフォルトに委譲
+
+上限超えで古いtool_resultを要約するが、閾値や要約ロジックはThinkのデフォルトcompactionに委譲。自前実装しない。

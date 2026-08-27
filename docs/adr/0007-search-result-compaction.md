@@ -1,0 +1,3 @@
+# Web検索結果は永続だが上限超えで自動要約
+
+tool_resultはSessionに永続するが、モデル上限に近づいたら古いtool_resultから自動要約（compaction）して回収。単純削除やエラー返信はしない。
