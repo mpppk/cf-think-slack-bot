@@ -1,3 +1,0 @@
-# 編集は直前user発言を置換、削除は1往復削除
-
-Slack編集（message_changed）は直前のuser発言だけを新内容で置換し再生成、削除（message_deleted）は直前user+assistant+tool_resultの1往復を削除。編集中に新メッセージが競合したら置換を優先。message_changed/deletedをbot_eventsに追加する必要がある。
