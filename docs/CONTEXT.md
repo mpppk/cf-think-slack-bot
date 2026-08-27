@@ -1,7 +1,6 @@
 # cf-think-slack-bot Context
 
 Slack上で「最初だけ @bot、以降はスレッド内で自然に会話」するボットを Cloudflare Workers + Think + Chat SDK で提供するコンテキスト。
-
 ## Language
 
 ### Slack Thread
@@ -34,37 +33,37 @@ _Avoid_: Slack履歴, ChatSDK履歴
 
 
 ### Edit
-Slackの `message_changed` / `message_deleted` で届く訂正。Sessionでは直前user発言を新内容で置換（削除は1往復削除）し再生成する（ラウンド1 Q2 + ラウンド2 Q8で巻き戻し→置換に精密化）。
+Slackの `message_changed` / `message_deleted` で届く訂正。Sessionでは直前user発言を新内容で置換（削除は1往復削除）し再生成する。
 _Avoid_: 訂正メッセージ, 再送
 
 ### Attachment
-Slackに添付された画像。jpeg/png/webp、10MB以下、1メッセージ4枚までをVisionでLLMへ渡し、超過は無視して日本語で「4枚までです」「10MB超は未対応」と通知しSessionに保存しない（ラウンド2 Q9）。
+Slackに添付された画像。jpeg/png/webp、10MB以下、1メッセージ4枚までをVisionでLLMへ渡し、超過は無視して日本語で「4枚までです」「10MB超は未対応」と通知しSessionに保存しない。
 _Avoid_: ファイル, 添付ファイル
 
 ### Compaction
-Sessionがモデル上限に近づいたとき古いtool_resultを要約してトークンを回収する操作。Web検索結果は永続だが上限超えで自動要約される（ラウンド2 Q10）。
+Sessionがモデル上限に近づいたとき古いtool_resultを要約してトークンを回収する操作。Web検索結果は永続だが上限超えで自動要約される。
 _Avoid_: 要約, 圧縮
 
 ### Idle
-Subscriptionの無通信期間。最終Slackメッセージから90日で購読のみ解除、Sessionは保持。スレッド内の誰かの新メッセージで自動再購読（ラウンド2 Q11）。
+Subscriptionの無通信期間。最終Slackメッセージから90日で購読のみ解除、Sessionは保持。スレッド内の誰かの新メッセージで自動再購読。
 _Avoid_: TTL, タイムアウト
 
 ### Failure Notice
-LLM/OpenRouter失敗時にスレッドへ返す詳細エラー表示。dedupeはサイレント、429/5xxは詳細（code/message）を日本語とともに表示（ラウンド1 Q7 + ラウンド2 Q12で詳細表示に精密化）。
+LLM/OpenRouter失敗時にスレッドへ返す詳細エラー表示。dedupeはサイレント、429/5xxは詳細（code/message）を日本語とともに表示。
 _Avoid_: エラーメッセージ, 例外
 
 ### Bot Event
-SlackがWorkerへ送るイベント種別。`app_mention` / `message.channels` / `message.groups` / `message.im` に加え、編集/削除対応のため `message_changed` / `message_deleted` も購読する（ラウンド3 Q13）。
+SlackがWorkerへ送るイベント種別。`app_mention` / `message.channels` / `message.groups` / `message.im` を購読する。編集・削除は独立したイベントではなく `message.*` の `subtype`（`message_changed` / `message_deleted`）として同じ購読で届く。
 _Avoid_: Event, webhook
 
 ### R2 Image Store
-編集や添付で受領した画像を一時保存するR2バケット。4枚/10MBルールの前処理とVisionへの受け渡しに使う（ラウンド3 Q16で追加、Q14で編集時も再評価）。
+編集や添付で受領した画像を一時保存するR2バケット。4枚/10MBルールの前処理とVisionへの受け渡しに使う。
 _Avoid_: ストレージ, バケット
 
 ### R2 Retention
-R2に一時保存した画像はVisionへ渡した直後に削除する（ラウンド4 Q17）。Sessionは無期限だがR2は一時的。
+R2に一時保存した画像はVisionへ渡した直後に削除する。Sessionは無期限だがR2は一時的。
 _Avoid_: 保持期間, 削除ポリシー
 
 ### Compaction Trigger
-Session上限超え時の要約はThinkデフォルトのcompactionに委譲し、閾値はThink任せとする（ラウンド4 Q18）。
+Session上限超え時の要約はThinkデフォルトのcompactionに委譲し、閾値はThink任せとする。
 _Avoid_: 閾値, 自前要約
