@@ -90,10 +90,11 @@ bun run smoke:preview   # preview（challenge まで。SLACK_SIGNING_SECRET が�
 ワークフローが動くには次が必要。
 
 1. **ラベル** `deploy-preview` を作る
-2. **GitHub Environments** を2つ作り、Secretを登録する
-   - `preview`: `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` / `OPENROUTER_API_KEY` / `TAVILY_API_KEY`（Slackの2つは **preview App** のもの）
-   - `production`: 同じ名前で、Slackの2つは **production App** のもの
-   - APIトークンは "Edit Cloudflare Workers" 相当（対象アカウントの Workers Scripts:Edit）
+2. **GitHub Environments** を2つ（`preview` / `production`）作り、下記を登録する。**Secrets と Variables で置き場所が違う**ので注意（ワークフローは `secrets.` / `vars.` で別々に参照する）
+   - **Secrets**: `CLOUDFLARE_API_TOKEN` / `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` / `OPENROUTER_API_KEY` / `TAVILY_API_KEY`
+   - **Variables**: `CLOUDFLARE_ACCOUNT_ID`（秘密ではないので Variables 側）
+   - Slackの2つは環境ごとに別Appのもの（`preview` には preview App、`production` には production App）。残りは両環境で同じ値でよい
+   - APIトークンの権限は **`Workers Scripts:Edit` 単体で足りる**（実機で確認済み。secretの同期もスクリプトのサブリソースなのでこれに含まれる）
 3. **main のブランチ保護**: PR必須、`Type Check, Lint & Test` を required check に、force push 禁止
 
 ## 監視

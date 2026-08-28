@@ -204,6 +204,12 @@ jobs:
       # 値はシェルの引数ではなく env 経由で渡す(GitHub のマスクを効かせ、
       # プロセス一覧やログに出さないため)。
       #
+      # `CLOUDFLARE_ACCOUNT_ID` だけは **secrets ではなく vars**(Environment の
+      # Variables)から読む。アカウントIDは秘密ではないので Variables が置き場所として
+      # 正しく、実際そちらに登録されている。`secrets.` で参照していた間は**空文字が
+      # 渡っていた**(未設定のsecretはエラーにならず空になる)。APIトークンのアクセス先
+      # アカウントが1つだったため wrangler が自動解決して動いてしまい、気付けなかった。
+      #
       # **デプロイより前に置く**。新しいコードが最初から正しい secret で動き始める順序。
       # 初回は Worker がまだ Cloudflare 上に存在しないが、wrangler は非対話環境では
       # draft Worker を自動生成してから secret を入れる(`createDraftWorker` が
@@ -213,7 +219,7 @@ jobs:
         env:
           WRANGLER_SEND_METRICS: "false"
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -232,7 +238,7 @@ jobs:
         env:
           WRANGLER_SEND_METRICS: "false"
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: bun run deploy:preview
 
       # デプロイ済み環境を外形から叩く。challenge まで通すので、
@@ -282,7 +288,7 @@ jobs:
         env:
           WRANGLER_SEND_METRICS: "false"
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: bun run deploy:preview
 
       - name: Smoke test
@@ -326,7 +332,7 @@ jobs:
         env:
           WRANGLER_SEND_METRICS: "false"
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -345,7 +351,7 @@ jobs:
         env:
           WRANGLER_SEND_METRICS: "false"
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: bun run deploy
 
       - name: Smoke test
