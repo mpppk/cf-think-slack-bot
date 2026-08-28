@@ -9,7 +9,7 @@ Slack上で「最初だけ `@bot`、以降はスレッド内で自然に会話�
 ## Slack App
 
 - **ワークスペース**: `niboshiporipori.slack.com`。手動招待したチャンネルのみで動作し、DMは誰でも可
-- **App は2つ**: `cf-think-slack-bot`（production）と `cf-think-slack-bot-preview`（preview）。Slack App は Request URL を1つしか持てないため環境ごとに分ける（[ADR 0020](docs/adr/0020-two-environments-workers-dev.md)）。manifest はリポジトリ管理（[ADR 0023](docs/adr/0023-slack-app-manifest-in-repo.md)）
+- **App は2つ**: `cf-think-slack-bot`（production / `A0BT6AMR6UD`）と `cf-think-slack-bot-preview`（preview / `A0BSV2HR8CF`）。Slack App は Request URL を1つしか持てないため環境ごとに分ける（[ADR 0020](docs/adr/0020-two-environments-workers-dev.md)）。manifest は [manifests/](manifests/) で管理（[ADR 0023](docs/adr/0023-slack-app-manifest-in-repo.md)）。設定画面は `https://api.slack.com/apps/{app_id}`
 - **表示名 / アイコン**: `cf-think-slack-bot`
 - **bot_events**: `app_mention` / `message.channels` / `message.groups` / `message.im`
   - 編集・削除は独立したイベントではなく `message.*` の `subtype`（`message_changed` / `message_deleted`）として同じ購読で届く。ボットはこれらに追従しない（[ADR 0005](docs/adr/0005-no-edit-tracking.md)）
@@ -26,6 +26,13 @@ wrangler secret put SLACK_BOT_TOKEN
 ```
 
 必要なもの: `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` / `OPENROUTER_API_KEY` / `TAVILY_API_KEY`。Slack の2つは環境ごとに別のAppのものを設定する。
+
+Slack の分は 1Password の `cf-think-slack-bot` 保管庫にある。値を手で貼らずに渡せる。
+
+```bash
+op read "op://cf-think-slack-bot/Slack App (cf-think-slack-bot production)/SLACK_BOT_TOKEN" \
+  | wrangler secret put SLACK_BOT_TOKEN --env production
+```
 
 OpenRouterアカウント側でクレジット上限を設定しておくこと。コード側にレート制限とコスト上限は意図的に実装していない（[ADR 0004](docs/adr/0004-openrouter-fixed.md)）。
 

@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+
+# secret（README「Secret / 環境変数」参照）
+.dev.vars
+
+# Slack CLI のプロジェクト設定。App のインストールに使うだけで、
+# manifest の正はリポジトリの manifests/（ADR 0023）
+.slack/

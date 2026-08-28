@@ -1,0 +1,42 @@
+{
+  "display_information": {
+    "name": "cf-think-slack-bot",
+    "description": "Slack上で最初だけ @bot、以降はスレッド内で自然に会話するボット — Cloudflare Workers + Think + Chat SDK",
+    "background_color": "#000000"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "cf-think-slack-bot",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "chat:write",
+        "files:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://cf-think-slack-bot.workers.dev/messengers/slack/webhook",
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
