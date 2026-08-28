@@ -6,9 +6,14 @@
 # 「デプロイに固有の壊れ方」を見る。具体的には
 #   - Worker がそもそも起動しているか(/health)
 #   - 署名検証の関門が生きているか(署名なし → 401)
-#   - **デプロイ済み環境の SLACK_SIGNING_SECRET が Slack App の実物と一致しているか**
-#     (--with-challenge。`wrangler secret list` は名前しか返さないので値の一致は
-#      ここでしか分からない)
+#   - **GitHub Secrets → Worker の secret 同期が実際に効いているか**
+#     (--with-challenge。`wrangler secret list` は名前しか返さないので、正しい名前で
+#      値が入り実行時に読めていることは、署名を通してみるしか確かめようがない)
+#
+# 逆に**確かめられないこと**: GitHub に入れた値が Slack App の実物と一致しているか。
+# CI は同じ値で Worker に書き込み同じ値で署名するため、両者は構成上必ず一致する。
+# 実物との一致は Slack 自身が署名して送ってくる場合しか分からない
+# (Event Subscriptions の Request URL が Verified になること。ADR 0025)。
 #
 # 使い方:
 #   bash scripts/smoke.sh <BASE_URL> [--with-challenge]

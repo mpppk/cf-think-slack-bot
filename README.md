@@ -74,7 +74,9 @@ CIが自動で行う（[ADR 0024](docs/adr/0024-deploy-from-github-actions.md)�
 
 **プレビューは同時に1本のPRしか使えない。** Durable Object を持つ Worker にはPRごとのプレビューURLが発行されず（Cloudflareの制約）、Slack App の Request URL も1つしか持てないため、preview は固定URLの Worker 1本になる。ラベルが2本以上のPRに付いているとCIが落ちる（[ADR 0020](docs/adr/0020-two-environments-workers-dev.md)）。ラベルを外すと preview は main の内容に戻る。
 
-デプロイ後は `scripts/smoke.sh` が外形から検証する。preview では**正しい署名の `url_verification` に challenge が返るところまで**確認するので、Worker に配られた signing secret が preview Slack App の実物と一致していることがここで分かる（[ADR 0025](docs/adr/0025-secrets-ssot-github.md)）。
+デプロイ後は `scripts/smoke.sh` が外形から検証する。preview では**正しい署名の `url_verification` に challenge が返るところまで**確認するので、GitHub Secrets から Worker への secret 同期が実際に効いていることがここで分かる（[ADR 0025](docs/adr/0025-secrets-ssot-github.md)）。
+
+**この検査は「GitHubに入れた値が Slack App の実物と一致しているか」までは見ない**（CIが同じ値で書き込み同じ値で署名するため）。実物との一致は、Slack App の Event Subscriptions に Request URL を登録して **Verified** になることでしか確認できない。デプロイ後に行うこと。
 
 ```bash
 bun run smoke           # production

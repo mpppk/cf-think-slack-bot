@@ -23,7 +23,8 @@ Slack の Signing Secret は **App ごとに1つで、用途別の追加発行�
 混同すると片方をサボる理由になるので、責務を分ける。
 
 - **署名検証ロジックの正しさ**（改竄・期限切れ・ヘッダ欠落・別secret）は `*.workers.test.ts` が網羅する。任意の値をenvに注入すればよく、**実secretは要らない**。
-- **デプロイ済み環境のsecretが Slack App の実物と一致しているか**は `scripts/smoke.sh --with-challenge` だけが分かる。`wrangler secret list` は名前しか返さないため、値の一致を見る手段が他に無い。
+- **GitHub Secrets → Worker の同期が実際に効いたか**は `scripts/smoke.sh --with-challenge` だけが分かる。`wrangler secret list` は名前しか返さないので、正しい名前で・正しい値が入り・実行時に読めていることを外から確かめる手段が他に無い。
+- **GitHub Secrets に入れた値が Slack App の実物と一致しているか**は、この検査では分からない。CIは同じ GitHub Secret の値で Worker に書き込み、同じ値で署名して叩くため、両者は構成上必ず一致する。実物との一致を確かめられるのは **Slack 自身が本物の secret で署名して送ってくる場合だけ**で、具体的には Slack App の Event Subscriptions に Request URL を登録して Verified になることが唯一の端点間検証になる。デプロイ後にこれを行う。
 
 `--with-challenge` を指定して `SLACK_SIGNING_SECRET` が無い場合、スモークは**スキップせず失敗する**。「検査できなかった」が緑になると、この検査を持っている意味が消える。
 

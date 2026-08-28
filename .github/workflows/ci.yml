@@ -203,6 +203,12 @@ jobs:
       # 「CIは緑・デプロイは成功・Slack からは 401」になる。
       # 値はシェルの引数ではなく env 経由で渡す(GitHub のマスクを効かせ、
       # プロセス一覧やログに出さないため)。
+      #
+      # **デプロイより前に置く**。新しいコードが最初から正しい secret で動き始める順序。
+      # 初回は Worker がまだ Cloudflare 上に存在しないが、wrangler は非対話環境では
+      # draft Worker を自動生成してから secret を入れる(`createDraftWorker` が
+      # `fallbackValue: true` で確認をスキップする)ので、この順序のままで通る。
+      # 「Worker が無いと落ちるのでは」と思って順序を入れ替えないこと。
       - name: Sync secrets to the preview Worker
         env:
           WRANGLER_SEND_METRICS: "false"
