@@ -15,7 +15,9 @@ Slack上で「最初だけ `@bot`、以降はスレッド内で自然に会話�
   - 編集・削除は独立したイベントではなく `message.*` の `subtype`（`message_changed` / `message_deleted`）として同じ購読で届く。ボットはこれらに追従しない（[ADR 0005](docs/adr/0005-no-edit-tracking.md)）
 - **OAuth スコープ**: 画像添付を読むために `files:read` が必要。無いとSlackがファイル本体ではなくHTMLのログインページを返す
 - **Agent messaging experience（`agent_view`）**: 使わない（[ADR 0002](docs/adr/0002-thread-identity-mapping.md)）
-- **Webhook URL**: `https://{worker}/messengers/slack/webhook`
+- **Webhook URL**（Event Subscriptions の Request URL）: **アカウントサブドメイン `niboshi` を必ず含める**。`<worker名>.workers.dev` としてしまうと別のホスト名になり、Slack が「The server couldn't be reached」で弾く
+  - production: `https://cf-think-slack-bot.niboshi.workers.dev/messengers/slack/webhook`
+  - preview: `https://cf-think-slack-bot-preview.niboshi.workers.dev/messengers/slack/webhook`
 
 ## Secret / 環境変数
 
