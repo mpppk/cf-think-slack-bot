@@ -1,0 +1,26 @@
+{
+	"include": ["src/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"],
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"lib": ["ES2022"],
+		// "node" は scripts/ (bun で動かす運用スクリプト) のため。
+		// Worker 側のコードで node 組込を使わないことは workerd のテストが弾く。
+		"types": ["./worker-configuration.d.ts", "node"],
+
+		/* Bundler mode */
+		"moduleResolution": "bundler",
+		"resolveJsonModule": true,
+		"verbatimModuleSyntax": true,
+		"noEmit": true,
+
+		/* Linting */
+		"skipLibCheck": true,
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noFallthroughCasesInSwitch": true,
+		"noUncheckedSideEffectImports": true
+	}
+}

@@ -1,0 +1,53 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "cf-think-slack-bot",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"workers_dev": true,
+
+	// Preview URLs は使わない(ADR 0020)。Durable Object を実装した Worker には
+	// そもそも発行されないうえ、Slack App の Request URL は1つしか持てないので
+	// 可変URLは叩けない。明示しないとデプロイのたびに「既定で有効にする」旨の
+	// 警告が出るので、使わないという判断を設定として書いておく。
+	"preview_urls": false,
+
+	// ADR 0018 で観測性を Workers Logs のみと決めている。これを有効にしないと
+	// `wrangler tail` のライブ表示しか残らず、後追いの調査経路が消える。
+	"observability": { "enabled": true },
+
+	// Slack Thread ごとに1つ生成される隔離単位（docs/CONTEXT.md: Thread Agent）。
+	// Think Session の永続先が DO SQLite なので storage は "sqlite"。
+	//
+	// 旧来の `migrations` 配列（タグ付きの手続き的マイグレーション）ではなく
+	// 宣言的な `exports` を使う。新規プロジェクトはこちらが現行の方式で、
+	// リネーム・削除も tombstone（`state`）として1箇所に現れるため、
+	// 破壊的変更をレビューと機械検査で捕まえやすい。
+	"exports": {
+		"ThreadAgent": { "type": "durable-object", "storage": "sqlite" }
+	},
+
+	"durable_objects": {
+		"bindings": [{ "name": "THREAD_AGENT", "class_name": "ThreadAgent" }]
+	},
+
+	"vars": { "ENVIRONMENT": "production" },
+
+	// preview は production とは別の Worker・別の Slack App（ADR 0020）。
+	// Durable Object バインディングと vars は環境に継承されないため、
+	// env ごとに書き直す必要がある（片方だけ書くとデプロイ時の検証で落ちる）。
+	// `script_name` を指定していないので preview の DO は
+	// `cf-think-slack-bot-preview` に属し、production とは別の永続領域になる。
+	"env": {
+		"preview": {
+			"name": "cf-think-slack-bot-preview",
+			"workers_dev": true,
+			"preview_urls": false,
+			"observability": { "enabled": true },
+			"durable_objects": {
+				"bindings": [{ "name": "THREAD_AGENT", "class_name": "ThreadAgent" }]
+			},
+			"vars": { "ENVIRONMENT": "preview" }
+		}
+	}
+}

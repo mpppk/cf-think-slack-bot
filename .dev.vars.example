@@ -1,0 +1,11 @@
+# ローカル開発用のsecret。`.dev.vars` にコピーして値を埋める（`.dev.vars` はコミットしない）。
+#
+# デプロイ済み環境のsecretは CI が GitHub Secrets から同期する（ADR 0025）。
+# 手で `wrangler secret put` する必要は無い。
+
+# preview / production で別の Slack App のものを使う（ADR 0020）
+SLACK_BOT_TOKEN="xoxb-..."
+SLACK_SIGNING_SECRET=""
+
+OPENROUTER_API_KEY=""
+TAVILY_API_KEY=""

@@ -1,0 +1,33 @@
+{
+	"name": "cf-think-slack-bot",
+	"private": true,
+	"type": "module",
+	"packageManager": "bun@1.3.11",
+	"scripts": {
+		"dev": "wrangler dev",
+		"typecheck": "tsc",
+		"check": "biome check",
+		"format": "biome format --write",
+		"test": "vitest run",
+		"cf-typegen": "wrangler types --env-file=/dev/null --strict-vars=false",
+		"check:types": "wrangler types --env-file=/dev/null --strict-vars=false --check",
+		"check:audit": "bun audit --audit-level=high",
+		"check:deploy": "wrangler deploy --dry-run --env=\"\"",
+		"check:deploy:preview": "wrangler deploy --dry-run --env preview",
+		"deploy": "wrangler deploy --env=\"\"",
+		"deploy:preview": "wrangler deploy --env preview",
+		"smoke": "bash scripts/smoke.sh https://cf-think-slack-bot.niboshi.workers.dev",
+		"smoke:preview": "bash scripts/smoke.sh https://cf-think-slack-bot-preview.niboshi.workers.dev --with-challenge",
+		"logs": "wrangler tail --env=\"\"",
+		"logs:preview": "wrangler tail --env preview",
+		"check:conventions": "bun scripts/check-conventions.ts"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.11",
+		"@cloudflare/vitest-pool-workers": "^0.22.0",
+		"@types/node": "^26.4.0",
+		"typescript": "^7.0.2",
+		"vitest": "^4.1.11",
+		"wrangler": "^4.127.0"
+	}
+}
