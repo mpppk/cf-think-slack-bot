@@ -51,6 +51,9 @@ BASE_URL="${BASE_URL%/}" # 末尾スラッシュを除去
 # 一過性の 5xx やデプロイ伝播中の揺らぎを吸収する
 CURL_OPTS=(--silent --show-error --location --max-time 20 --retry 3 --retry-delay 2 --retry-connrefused)
 
+# デプロイ直後の待ち時間の上限(秒)。テスト用に環境変数で上書きできる。
+READY_TIMEOUT="${SMOKE_READY_TIMEOUT:-90}"
+
 pass=0
 fail=0
 
@@ -65,6 +68,33 @@ ng() {
 }
 
 echo "smoke: $BASE_URL"
+
+# 0) ホスト名が応答し始めるまで待つ。
+#
+# **新しい Worker の初回デプロイでは workers.dev のホスト名がまだ伝播しておらず、
+# 404(Cloudflare error code 1042)や 523 が返ることがある**。Cloudflare のドキュメントも
+# 「初回は DNS 伝播中にエラーが出るが1分ほどで解消する」と書いている。実際に
+# 本番の初回デプロイで踏んだ(404 + error code 1042)。
+#
+# curl の `--retry` は 5xx/408/429 と接続失敗しか再試行しないため、この 404 は
+# 吸収されない。そこで**検査を始める前に** /health が 200 を返すまで待つ。
+#
+# 待ちきれなければ「伝播待ちでは説明の付かない壊れ方」なので失敗させる。
+# 下の各検査は待った後に走るので、判定は一切緩めていない。
+deadline=$(( $(date +%s) + READY_TIMEOUT ))
+waited=0
+while :; do
+  ready_status="$(curl "${CURL_OPTS[@]}" -o /dev/null -w '%{http_code}' "${BASE_URL}/health" 2>/dev/null)"
+  [ "$ready_status" = "200" ] && break
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    printf '  FAIL  %ss 待っても /health が 200 を返しません (最後の応答: %s)\n' "$READY_TIMEOUT" "$ready_status"
+    echo "smoke: 0 passed, 1 failed"
+    exit 1
+  fi
+  sleep 3
+  waited=$((waited + 3))
+done
+[ "$waited" -gt 0 ] && printf '  info  ホスト名の伝播を %s 秒待ちました\n' "$waited"
 
 # 1) Worker が起動しているか
 status="$(curl "${CURL_OPTS[@]}" -o /tmp/smoke-health.txt -w '%{http_code}' "${BASE_URL}/health")"
