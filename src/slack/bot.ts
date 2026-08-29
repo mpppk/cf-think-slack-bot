@@ -17,12 +17,12 @@ import {
 	filterAttachments,
 	toDataUrl,
 } from "./attachment";
-import { installWorkerdCachePatch } from "./workerd-cache-patch";
 import { classifyFailure, formatFailureNotice } from "./failure-notice";
 import {
 	installMessengerPatch,
 	setPendingFailureNotice,
 } from "./messenger-patch";
+import { installWorkerdCachePatch } from "./workerd-cache-patch";
 
 // 生成失敗時の投稿を allowlist へ差し替えるパッチを workerd 起動時に当てる（ADR 0009）
 installMessengerPatch();
