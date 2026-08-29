@@ -23,6 +23,33 @@
 
 シークレットの**正は GitHub Environments の Secrets**（`preview` / `production`）で、デプロイジョブが `wrangler secret bulk` で Worker へ同期する。Worker 側は導出物なので `wrangler secret put` を手で叩かない（[ADR 0025](docs/adr/0025-secrets-ssot-github.md)）。
 
+### npm パッケージが `cache: "default"` を付けると workerd で必ず失敗する
+
+**Workers が受け付ける `cache` は `no-store` と `no-cache` だけ**で、それ以外は `TypeError: Unsupported cache mode: <mode>` になる。axios の fetch アダプタは `cache: "default"` を既定値に持つため、**axios を使う npm パッケージは Workers 上でそのままでは動かない**。
+
+このリポジトリでは `@chat-adapter/slack` → `@slack/web-api` → axios の経路で踏み、`src/slack/workerd-cache-patch.ts` で対処している。**触る前にそのファイルのコメントを読むこと。**
+
+症状が分かりにくい。`WebClient` はこれを一時的な通信失敗として扱い**リトライを繰り返す**ので、例外が表に出ないまま処理がハングする。preview で bot がメンションに無反応になり、原因特定に時間がかかった。ログにはこう出る:
+
+```
+[chat-sdk:slack] ... [WARN] web-api:WebClient:0 http request failed
+Unsupported cache mode: default
+```
+
+対処するときに踏んだ罠が3つあり、**どれか1つでも外すと直らない**:
+
+1. **`fetch` だけ差し替えても効かない。** axios は `new Request(url, resolvedOptions)` を組んでから fetch へ渡すので、例外は `Request` のコンストラクタで起きる。`Request` と `fetch` の両方に当てる
+2. **axios の設定では届かない。** axios は CJS と ESM の2ビルドを持ち、`@slack/web-api` は `require("axios")` で CJS 版、`import axios` は ESM 版を掴む。**別インスタンス**なので `axios.defaults.fetchOptions` を触っても Slack 側に効かない
+3. **当てる順番が本質。** axios はアダプタ生成時に `globalThis.Request` をクロージャへ捕獲する。ESM は import が本体より先に評価されるため、`@chat-adapter/slack` を import しているモジュールの本体でパッチを呼んでも手遅れ。**エントリ（`src/index.ts`）の先頭で副作用 import する**
+
+なお Cloudflare 公式の Slack agent サンプルは `@slack/web-api` を使わず素の `fetch` で Slack Web API を叩いており、この問題自体を踏まない。将来 adapter への委譲（[ADR 0003](docs/adr/0003-chatSdkMessenger-wrapper.md) / [ADR 0021](docs/adr/0021-delegate-slack-event-hygiene-to-adapter.md)）を見直すなら、その選択肢がある。
+
+### Webhook は Think の完了を待ってはいけない
+
+`src/slack/webhook.ts` は `ctx.waitUntil` で非同期に配送し、即 202 を返す（仕様§4.1「即座に ack を返し、実処理は非同期で行う」）。**これを「簡潔だから」と同期 `await` に戻さないこと。** Think の処理には LLM 呼び出しが含まれ3秒に収まらないため、Slack がリトライを繰り返し同じイベントが何度も配送される（実際に発生した）。
+
+配送には25秒のタイムアウトを入れてある。**ハングしたまま invocation が終わらないと Workers Logs に何も出ず、原因調査ができなくなる**ため。
+
 ## CI / デプロイの落とし穴
 
 ### ローカルの `bun run smoke:preview` は必ず1件失敗する
@@ -53,6 +80,12 @@ gh pr list --label deploy-preview --json number,url,title
 ```
 Canceling since a higher priority waiting request for CI-refs/pull/<N>/merge exists
 ```
+
+### スコープを増やしたら再インストールが要る
+
+`manifests/*.json` を Slack 管理画面に貼り付けるだけでは**スコープ変更は反映されない**。OAuth & Permissions から **Reinstall to Workspace** が必要で、その際 `SLACK_BOT_TOKEN` が変わることがある（変わったら GitHub Environments の secret を更新する）。
+
+スコープ不足は応答を止めるとは限らない。`users:read` が無いときは `missing_scope` をログに出しつつ応答自体は続き、チャンネルの発言者ラベル（`名前: 本文`）だけが落ちていた。**「動いているから足りている」とは判断できない**ので、ログを見ること。
 
 ## 複数エージェントで並行作業するとき
 
