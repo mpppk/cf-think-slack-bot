@@ -18,7 +18,8 @@
 				"groups:history",
 				"im:history",
 				"chat:write",
-				"files:read"
+				"files:read",
+				"users:read"
 			]
 		}
 	},
