@@ -2,6 +2,7 @@ import { createSlackAdapter } from "@chat-adapter/slack";
 import { Think } from "@cloudflare/think";
 import { chatSdkMessenger } from "@cloudflare/think/messengers";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { createTavilyTools } from "../tools/tavily";
 
 /**
  * Slack 向けの Think エージェント。
@@ -13,10 +14,24 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
  * - Session を正典とし Slack の conversations.replies で再構築しない(ADR 0001)
  */
 export class SlackBot extends Think<Env> {
+	/**
+	 * Think の fetch ツール（createFetchTools）を有効化（ADR 0017）。
+	 * public な fetch_url として登録され、allowlist に一致する https/http URL を
+	 * GET で取得できる。private/local アドレスは isBlockedHost でブロックされる。
+	 * fetch はユーザーが貼った URL を要約する用途で使う。
+	 */
+	override fetchTools = {
+		allowlist: ["https://**", "http://**"],
+	};
+
 	override getModel() {
 		return createOpenRouter({ apiKey: this.env.OPENROUTER_API_KEY ?? "" })(
 			"z-ai/glm-5.3-flash",
 		);
+	}
+
+	override getTools() {
+		return createTavilyTools({ apiKey: this.env.TAVILY_API_KEY });
 	}
 
 	override getMessengers() {
