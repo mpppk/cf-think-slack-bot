@@ -49,7 +49,7 @@ orca orchestration worker-start --task <task_id> --terminal <handle> --json
 
 worker は spec しか見ない。以下が抜けると事故る。
 
-- Issue の URL と、**「issue本文よりこの spec を優先せよ」の一文**（本文が信用できないリポジトリがある。このリポジトリの実例は [AGENTS.md](../../../AGENTS.md) 参照）
+- Issue の URL と、**「issue本文よりこの spec を優先せよ」の一文**。issue本文が壊れていることがある（2026-08-29 のセッションでは #26〜#31 の本文が丸ごと1つ後ろにずれており、`gh issue view` を読んだ worker が隣のissueの内容を実装しかけた。本文は後日修正済み）
 - 依存タスクの Task ID
 - 受け入れ基準（実行すべきコマンドを具体的に）
 - 参照すべき ADR
