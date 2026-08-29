@@ -1,4 +1,5 @@
 import { createSlackAdapter } from "@chat-adapter/slack";
+import type { Session } from "@cloudflare/think";
 import { Think } from "@cloudflare/think";
 import { chatSdkMessenger } from "@cloudflare/think/messengers";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
@@ -23,6 +24,19 @@ export class SlackBot extends Think<Env> {
 	override fetchTools = {
 		allowlist: ["https://**", "http://**"],
 	};
+
+	/**
+	 * Think Session の永続化設定（仕様§3.7, ADR 0001, ADR 0007）。
+	 *
+	 * Session は DO SQLite に無期限保持され、tool_result も永続する。
+	 * compaction は Think にデフォルトが無いため `onCompaction()` +
+	 * `compactAfter()` を明示的に登録する必要があるが、それは #28 で行う。
+	 * ここでは無期限保持を明示し、conversations.replies で再構築しない
+	 * 正典としての Session を保証するため何も登録せずそのまま返す。
+	 */
+	override configureSession(session: Session): Session {
+		return session;
+	}
 
 	override getModel() {
 		return createOpenRouter({ apiKey: this.env.OPENROUTER_API_KEY ?? "" })(
