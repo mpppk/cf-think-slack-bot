@@ -25,7 +25,7 @@ export { ThinkMessengerStateAgent } from "@cloudflare/think/messengers";
 export class ThreadAgent extends SlackBot {}
 
 export default {
-	async fetch(request, env) {
+	async fetch(request, env, ctx) {
 		const url = new URL(request.url);
 
 		// デプロイ済み環境をスモークで叩くためのエンドポイント(scripts/smoke.sh)。
@@ -34,7 +34,7 @@ export default {
 		}
 
 		if (request.method === "POST" && url.pathname === SLACK_WEBHOOK_PATH) {
-			return handleSlackWebhook(request, env);
+			return handleSlackWebhook(request, env, ctx);
 		}
 
 		return new Response("Not Found", { status: 404 });

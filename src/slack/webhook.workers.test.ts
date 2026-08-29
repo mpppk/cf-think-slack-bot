@@ -176,3 +176,20 @@ describe("弾いたリクエストのログ", () => {
 		});
 	});
 });
+
+describe("Think への配送", () => {
+	// ここが「配線が生きているか」を担保する唯一のテスト。
+	// Worker のエントリ経由(src/index.workers.test.ts)は仕様§4.1の即ackを検証するため
+	// 202 を返し、Think の応答を見られない。ctx を渡さない経路では同期配送になるので、
+	// Think が実際に処理したこと(200 ok)をここで確認する。
+	it("署名済みイベントを Think の messenger ルートへ渡し、その応答を返す", async () => {
+		const response = await handleSlackWebhook(
+			await signedRequest(APP_MENTION),
+			env,
+		);
+
+		// 202 はスタブが固定していた値。Think へ届いていれば messenger が 200 ok を返す。
+		expect(response.status).toBe(200);
+		await expect(response.text()).resolves.toBe("ok");
+	});
+});
