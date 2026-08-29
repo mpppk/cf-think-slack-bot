@@ -1,3 +1,7 @@
+// **この import は必ず先頭に置く。** axios(@slack/web-api 経由)はアダプタ生成時に
+// globalThis.Request を捕獲するため、@chat-adapter/slack を引き込む import より
+// 先に評価されないと workerd 非対応の cache 指定を落とせない。
+import "./slack/workerd-cache-patch";
 import { SlackBot } from "./slack/bot";
 import { handleSlackWebhook, SLACK_WEBHOOK_PATH } from "./slack/webhook";
 

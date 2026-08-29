@@ -57,6 +57,17 @@ function stripUnsupportedCache<T extends RequestInit | undefined>(init: T): T {
 	return rest as T;
 }
 
+/**
+ * **呼ぶ順番が重要。** axios はアダプタ生成時に `globalThis.Request` を
+ * クロージャへ捕獲し（CJSビルドの `const { fetch: envFetch, Request, Response } = env;`）、
+ * 以降の `new Request(...)` はその参照を使う。ESM では import が本体より先に
+ * 評価されるため、`@chat-adapter/slack` を import しているモジュールの本体で
+ * これを呼んでも手遅れになる。
+ *
+ * そのためこのモジュールは**読み込まれた時点で自分で適用する**。
+ * エントリ（`src/index.ts`）で、axios を引き込む import より前に
+ * `import "./slack/workerd-cache-patch";` として副作用込みで読むこと。
+ */
 export function installWorkerdCachePatch(): void {
 	if (installed) {
 		return;
@@ -76,3 +87,8 @@ export function installWorkerdCachePatch(): void {
 	globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
 		originalFetch(input, stripUnsupportedCache(init))) as typeof fetch;
 }
+
+// このモジュールが読み込まれた時点で適用する。axios がアダプタ生成時に
+// globalThis.Request を捕獲するため、@chat-adapter/slack の import より前に
+// 評価される必要がある（src/index.ts の先頭で副作用 import している）。
+installWorkerdCachePatch();
