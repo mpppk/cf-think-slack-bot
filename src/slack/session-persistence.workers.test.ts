@@ -1,54 +1,244 @@
 import { env } from "cloudflare:workers";
 import { createSlackAdapter } from "@chat-adapter/slack";
 import type { Session } from "@cloudflare/think";
-import { describe, expect, it } from "vitest";
-import { SlackBot } from "./bot";
+import { defaultContextOverflowClassifier } from "@cloudflare/think";
+import type {
+	SessionMessage,
+	SessionProvider,
+	StoredCompaction,
+} from "agents/experimental/memory/session";
+import { Session as SessionClass } from "agents/experimental/memory/session";
+import { describe, expect, it, vi } from "vitest";
+import {
+	COMPACTION_PROACTIVE_MAX_INPUT_TOKENS,
+	COMPACTION_THRESHOLD_TOKENS,
+	SlackBot,
+} from "./bot";
 
 // Think Session を正典とし、Slack の conversations.replies で再構築しない(ADR 0001)。
 // Session は無期限保持・tool_result も永続(仕様§3.7)。compaction は #28 で
-// 登録されるまで何もしないことが正しい(ADR 0007)。
+// onCompaction + compactAfter を登録し、overlay として保存する(ADR 0007)。
 
 function createBot(envOverrides: Partial<Env>): SlackBot {
 	const bot = Object.create(SlackBot.prototype) as SlackBot;
 	(bot as unknown as { env: Env }).env = envOverrides as Env;
+	// contextOverflow / classifyChatError はクラスフィールドのため Object.create では初期化されない。
+	// テストで SlackBot インスタンスのフィールドを検証する際は手動で初期化する
+	(bot as unknown as { contextOverflow: unknown }).contextOverflow = {
+		reactive: true,
+		proactive: { maxInputTokens: COMPACTION_PROACTIVE_MAX_INPUT_TOKENS },
+	};
+	(bot as unknown as { classifyChatError: unknown }).classifyChatError =
+		defaultContextOverflowClassifier;
 	return bot;
 }
 
+/**
+ * テスト用のインメモリ SessionProvider。
+ * AgentSessionProvider の SQLite / FTS5 を模すが、workerd の DO SQL 無しで
+ * Session の compaction overlay と search の分離を検証する。
+ */
+class InMemoryProvider implements SessionProvider {
+	private messages: SessionMessage[] = [];
+	private compactions: StoredCompaction[] = [];
+
+	getMessage(id: string): SessionMessage | null {
+		return this.messages.find((m) => m.id === id) ?? null;
+	}
+
+	getHistory(): SessionMessage[] {
+		return [...this.messages];
+	}
+
+	getLatestLeaf(): SessionMessage | null {
+		return this.messages.at(-1) ?? null;
+	}
+
+	getBranches(): SessionMessage[] {
+		return [];
+	}
+
+	getPathLength(): number {
+		return this.messages.length;
+	}
+
+	appendMessage(message: SessionMessage): void {
+		// id 重複は no-op（Session の冪等性に合わせる）
+		if (this.messages.some((m) => m.id === message.id)) {
+			return;
+		}
+		this.messages.push(message);
+	}
+
+	updateMessage(message: SessionMessage): void {
+		const idx = this.messages.findIndex((m) => m.id === message.id);
+		if (idx !== -1) {
+			this.messages[idx] = message;
+		}
+	}
+
+	deleteMessages(messageIds: string[]): void {
+		this.messages = this.messages.filter((m) => !messageIds.includes(m.id));
+	}
+
+	clearMessages(): void {
+		this.messages = [];
+		this.compactions = [];
+	}
+
+	addCompaction(
+		summary: string,
+		fromMessageId: string,
+		toMessageId: string,
+	): StoredCompaction {
+		const compaction: StoredCompaction = {
+			id: `compaction_${Date.now()}`,
+			summary,
+			fromMessageId,
+			toMessageId,
+			createdAt: new Date().toISOString(),
+		};
+		this.compactions.push(compaction);
+		return compaction;
+	}
+
+	getCompactions(): StoredCompaction[] {
+		return [...this.compactions];
+	}
+
+	searchMessages(
+		query: string,
+		limit = 20,
+	): { id: string; role: string; content: string; createdAt?: string }[] {
+		const q = query.toLowerCase();
+		const results: {
+			id: string;
+			role: string;
+			content: string;
+			createdAt?: string;
+		}[] = [];
+		for (const m of this.messages) {
+			const content = m.parts
+				.map((p) => (p as { text?: string }).text ?? "")
+				.join(" ")
+				.toLowerCase();
+			if (content.includes(q)) {
+				results.push({
+					id: m.id,
+					role: m.role,
+					content: m.parts
+						.map((p) => (p as { text?: string }).text ?? "")
+						.join(" "),
+					createdAt: m.createdAt?.toISOString(),
+				});
+				if (results.length >= limit) {
+					break;
+				}
+			}
+		}
+		return results;
+	}
+}
+
 describe("Think Session 永続化 (§3.7, ADR 0001, ADR 0007)", () => {
-	it("configureSession は Session をそのまま返し、無期限保持を保証する", async () => {
+	it("configureSession は onCompaction + compactAfter を登録する（ADR 0007）", async () => {
 		const bot = createBot({
 			SLACK_BOT_TOKEN: "xoxb-test",
 			SLACK_SIGNING_SECRET: "test-secret",
 			OPENROUTER_API_KEY: "test",
 		});
-		// Session のモック。onCompaction / compactAfter が #28 まで呼ばれないこと
-		// が「無期限保持・compaction未登録」の正しい状態。
-		const mockSession = {
-			onCompaction: (() => mockSession) as unknown as Session["onCompaction"],
-			compactAfter: (() => mockSession) as unknown as Session["compactAfter"],
-		} as unknown as Session;
+		const onCompaction = vi.fn(function (this: Session, _fn: unknown) {
+			return this;
+		}) as unknown as Session["onCompaction"];
+		const compactAfter = vi.fn(function (this: Session, _threshold: number) {
+			return this;
+		}) as unknown as Session["compactAfter"];
 
-		// 呼び出し回数を数えるため vi 的にラップしないが、呼ばれていないことを
-		// 返り値の同一性で間接的に担保する。もし将来ここで compaction を登録
-		// するようになれば、このテストは #28 の実装と共に更新される。
+		const mockSession = {
+			onCompaction,
+			compactAfter,
+		} as unknown as Session;
+		// Session の chain が this を返すように、this を mockSession に束縛
+		(mockSession as unknown as { onCompaction: unknown }).onCompaction = vi.fn(
+			(fn: unknown) => {
+				expect(typeof fn).toBe("function");
+				return mockSession;
+			},
+		) as unknown as Session["onCompaction"];
+		(mockSession as unknown as { compactAfter: unknown }).compactAfter = vi.fn(
+			(threshold: number) => {
+				expect(threshold).toBe(COMPACTION_THRESHOLD_TOKENS);
+				return mockSession;
+			},
+		) as unknown as Session["compactAfter"];
+
 		const result = await bot.configureSession(mockSession);
 		expect(result).toBe(mockSession);
+		expect(mockSession.onCompaction).toHaveBeenCalledTimes(1);
+		expect(mockSession.compactAfter).toHaveBeenCalledTimes(1);
+		expect(mockSession.compactAfter).toHaveBeenCalledWith(
+			COMPACTION_THRESHOLD_TOKENS,
+		);
 	});
 
-	it("configureSession は tool_result を間引かず、そのまま永続させる", async () => {
-		// tool_result は Session の UIMessage parts として保存される。ここで
-		// configureSession がフィルタを掛けていないことは「永続する」ことと
-		// 同値。上のテストと同じく、返り値が同一であることで担保する。
+	it("configureSession の閾値はモデル context_length に合わせて設定される（ADR 0004, ADR 0007）", async () => {
+		// z-ai/glm-5.3-flash は context_length 1,310,720（ADR 0004）。
+		// COMPACTION_THRESHOLD_TOKENS はその約7.6% で、heuristic 誤差と tool_result
+		// 膨張を考慮して保守的に設定されていること。
+		expect(COMPACTION_THRESHOLD_TOKENS).toBe(100_000);
+		// proactive は 1,310,720 の約76%（実効上限 1,048,576 の約95%）
+		expect(COMPACTION_PROACTIVE_MAX_INPUT_TOKENS).toBe(1_000_000);
+
+		const bot = createBot({
+			SLACK_BOT_TOKEN: "xoxb-test",
+			SLACK_SIGNING_SECRET: "test-secret",
+			OPENROUTER_API_KEY: "test",
+		});
+		expect(bot.contextOverflow).toEqual({
+			reactive: true,
+			proactive: { maxInputTokens: COMPACTION_PROACTIVE_MAX_INPUT_TOKENS },
+		});
+		// classifyChatError は defaultContextOverflowClassifier で
+		// "prompt is too long" / "context_length_exceeded" を検出できること
+		expect(bot.classifyChatError(new Error("prompt is too long"))).toBe(
+			"context_overflow",
+		);
+		expect(bot.classifyChatError(new Error("context_length_exceeded"))).toBe(
+			"context_overflow",
+		);
+		expect(bot.classifyChatError(new Error("irrelevant"))).toBeUndefined();
+	});
+
+	it("configureSession は tool_result を間引かず、compaction で overlay にする", async () => {
 		const bot = createBot({
 			SLACK_BOT_TOKEN: "xoxb-test",
 			SLACK_SIGNING_SECRET: "test-secret",
 		});
-		const session = {
-			// 最小のSessionモック: 実際のSessionなら tool parts を保持する
-			// ここではインスタンスの同一性で検証する
+		// tool_result を含む履歴でも configureSession がフィルタせず、
+		// compaction 登録を経て同一 Session を返すこと
+		const mockSession = {
+			onCompaction: vi.fn(function (this: Session) {
+				return this;
+			}) as unknown as Session["onCompaction"],
+			compactAfter: vi.fn(function (this: Session) {
+				return this;
+			}) as unknown as Session["compactAfter"],
 		} as unknown as Session;
-		const returned = await bot.configureSession(session);
-		expect(returned).toBe(session);
+		// chain 用に this を mockSession に固定
+		(
+			mockSession.onCompaction as unknown as ReturnType<typeof vi.fn>
+		).mockImplementation(function (this: unknown) {
+			return mockSession;
+		});
+		(
+			mockSession.compactAfter as unknown as ReturnType<typeof vi.fn>
+		).mockImplementation(function (this: unknown) {
+			return mockSession;
+		});
+		const returned = await bot.configureSession(mockSession);
+		expect(returned).toBe(mockSession);
+		expect(mockSession.onCompaction).toHaveBeenCalled();
+		expect(mockSession.compactAfter).toHaveBeenCalled();
 	});
 
 	it("SlackBot は Session を正典とし、Slack履歴の再取得に依存しない（ADR 0001）", async () => {
@@ -71,6 +261,94 @@ describe("Think Session 永続化 (§3.7, ADR 0001, ADR 0007)", () => {
 				"getSystemPrompt",
 			]),
 		);
+	});
+
+	it("要約は overlay として保存され、元の行は SQLite に残り search から参照できる（ADR 0007）", async () => {
+		// Session の compaction は addCompaction の overlay として保存され、
+		// 元の行は削除されない。getHistory は要約に置き換わるが、search は元の
+		// 行を FTS5 から引き続き返す。
+		const provider = new InMemoryProvider();
+		const session = new SessionClass(provider as unknown as SessionProvider);
+
+		// 検索用の特徴的なキーワードを含む履歴を作る
+		const keyword = "compaction-overlay-search-keyword-28";
+		await session.appendMessage({
+			id: "msg-1",
+			role: "user",
+			parts: [{ type: "text", text: `最初の発言 ${keyword} を含む` }],
+		} as SessionMessage);
+		await session.appendMessage({
+			id: "msg-2",
+			role: "assistant",
+			parts: [{ type: "text", text: "通常の応答" }],
+		} as SessionMessage);
+		for (let i = 3; i <= 10; i++) {
+			await session.appendMessage({
+				id: `msg-${i}`,
+				role: "user",
+				parts: [{ type: "text", text: `追加メッセージ ${i}` }],
+			} as SessionMessage);
+		}
+
+		// compaction 前は search でヒットすること
+		const before = await session.search(keyword);
+		expect(before.length).toBeGreaterThan(0);
+		expect(before[0]?.content).toContain(keyword);
+
+		// 古い範囲を要約した overlay を追加（LLM 要約の代わりに固定文字列）
+		// Session.addCompaction は overlay として保存し、元の行は消さない
+		await session.addCompaction("要約: 過去の会話の要点", "msg-1", "msg-5");
+
+		// overlay 追加後も search で元の行がヒットすること
+		const after = await session.search(keyword);
+		expect(after.length).toBeGreaterThan(0);
+		expect(after[0]?.content).toContain(keyword);
+		// search は FTS5 のため要約文字列とは別に元の行を返す
+		expect(after[0]?.id).toBe("msg-1");
+
+		// getCompactions で overlay が保存されていること
+		const compactions = await session.getCompactions();
+		expect(compactions).toHaveLength(1);
+		expect(compactions[0]?.summary).toContain("要約");
+	});
+
+	it("長いスレッドでも compaction があれば context_overflow で失敗しない", async () => {
+		// compaction 登録があることで session.compact() が null でなく
+		// 要約を返す = Think の reactive/proactive が shortened=true で
+		// リトライできることを、Session レベルで確認する。
+		const provider = new InMemoryProvider();
+		const session = new SessionClass(provider as unknown as SessionProvider);
+
+		// compaction 関数を登録（テストでは LLM を呼ばず固定要約を返す）
+		session.onCompaction(async (messages) => {
+			if (messages.length < 5) {
+				return null;
+			}
+			return {
+				fromMessageId: messages[1]?.id ?? messages[0]?.id ?? "",
+				toMessageId: messages[5]?.id ?? messages[0]?.id ?? "",
+				summary: "テスト要約: 中間を圧縮",
+			};
+		});
+		session.compactAfter(2); // 閾値を極小にしてすぐ発火するようにする
+
+		// 履歴を閾値を超えるまで積む
+		for (let i = 0; i < 10; i++) {
+			await session.appendMessage({
+				id: `long-${i}`,
+				role: i % 2 === 0 ? "user" : "assistant",
+				parts: [{ type: "text", text: `long message ${i} `.repeat(50) }],
+			} as SessionMessage);
+		}
+
+		// compact() が要約を返す = reactive が shortened=true で retry できる
+		const result = await session.compact();
+		expect(result).not.toBeNull();
+		expect(result?.summary).toContain("テスト要約");
+
+		// compact 後も overlay が保存されていること
+		const compactions = await session.getCompactions();
+		expect(compactions.length).toBeGreaterThan(0);
 	});
 });
 
