@@ -107,3 +107,33 @@ bun run logs:preview    # preview
 ```
 
 `wrangler tail` はライブのみなので、後から追うぶんは `wrangler.jsonc` の `observability` で Workers Logs に保存している。
+
+ログは `src/observability/log.ts` が唯一の入口で、経路を表す `op` が必ず付く。経路ごとに `console.log` を直書きしないこと（フィールド名がドリフトすると絞り込みが経路ごとに効かなくなる）。
+
+```bash
+bun run logs:preview -- --search slack_webhook
+```
+
+## Slack からの動作確認
+
+**ボットが発言する実装が入るまで、Slack の画面上では何も起きない。** Webhook はイベントを受理して `202` を返すだけなので、届いていることを確認する手段は Workers Logs のログ1行になる。
+
+```
+{ op: 'slack_webhook', msg: 'イベントを受理した', payloadType: 'event_callback',
+  eventId: 'Ev0PV52K21', teamId: 'T0001', eventType: 'app_mention',
+  channelId: 'C0LAN2Q65', channelType: 'channel', userId: 'U061F7AUR',
+  ts: '1515449522.000016', threadTs: '1515449522.000016' }
+```
+
+**メッセージ本文（`event.text`）は載せない。** 会話の中身が Workers Logs に残り続けるのを避けるためで、経路の確認には種類と宛先だけで足りる。本文が要るデバッグはローカルで行う。
+
+デプロイ済みの preview で確認する手順:
+
+1. Slack App `cf-think-slack-bot-preview` の Event Subscriptions で bot events を購読する（上記の `bot_events` 参照）
+2. **ワークスペースに再インストールする**（イベントやスコープを足したら必須）
+3. チャンネルにボットを招待する（`/invite @cf-think-slack-bot-preview`）
+4. `bun run logs:preview` を流しながらメンションする
+
+`401` が出たら署名の不一致。ログの `hasTimestamp` / `hasSignature` で切り分ける。両方 `true` なら Signing Secret の取り違え（その Slack App の値と GitHub Environment `preview` の `SLACK_SIGNING_SECRET` がズレている）、両方 `false` なら Slack 以外からのアクセス。
+
+実装しながら回すならローカルの方が速い。上記「ローカル開発」のトンネルURLを preview App の Request URL に入れ替えると `console.log` が手元に出る。**終わったら Request URL を preview Worker に戻すこと**（戻し忘れると preview 環境が死んだままになる）。
