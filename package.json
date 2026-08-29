@@ -29,5 +29,13 @@
 		"typescript": "^7.0.2",
 		"vitest": "^4.1.11",
 		"wrangler": "^4.127.0"
+	},
+	"dependencies": {
+		"@chat-adapter/slack": "4.39.0",
+		"@cloudflare/think": "0.17.0",
+		"@openrouter/ai-sdk-provider": "3.0.0",
+		"agents": "0.22.0",
+		"ai": "7.0.0",
+		"zod": "4.1.12"
 	}
 }
