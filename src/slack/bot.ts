@@ -1,5 +1,10 @@
 import { createSlackAdapter } from "@chat-adapter/slack";
-import type { ChatErrorContext, Session } from "@cloudflare/think";
+import type {
+	ChatErrorContext,
+	Session,
+	TurnConfig,
+	TurnContext,
+} from "@cloudflare/think";
 import { defaultContextOverflowClassifier, Think } from "@cloudflare/think";
 import { chatSdkMessenger } from "@cloudflare/think/messengers";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
@@ -7,6 +12,11 @@ import { createCompactFunction } from "agents/experimental/memory/utils";
 import { generateText } from "ai";
 import { logError } from "../observability/log";
 import { createTavilyTools } from "../tools/tavily";
+import {
+	type AttachmentInput,
+	filterAttachments,
+	toDataUrl,
+} from "./attachment";
 import { classifyFailure, formatFailureNotice } from "./failure-notice";
 import {
 	installMessengerPatch,
@@ -127,6 +137,150 @@ export class SlackBot extends Think<Env> {
 
 	override getSystemPrompt() {
 		return "あなたは丁寧な口調で応答するアシスタントです。Slackで読めるMarkdownで回答してください。";
+	}
+
+	/**
+	 * 画像添付の受け取りと上限超過時の通知（仕様§3.4, ADR 0006）。
+	 *
+	 * - jpeg / png / webp、1枚10MB以下、1メッセージ4枚までを Vision でモデルへ渡す
+	 * - 非画像・5枚目以降・10MB超は Session に保存せず、日本語1行で通知する
+	 * - 取得は attachment.fetchData() / attachment.fetch() に委譲する。Session には
+	 *   fetchMetadata.url を残し、過去ターンの画像は必要時に再取得する想定だが、
+	 *   現実装では data URL を Session に保存し、次ターン以降も履歴としてモデルへ渡る。
+	 *   ユーザーが Slack 上でファイルを削除した際の再取得失敗は許容する（ADR 0006）。
+	 * - Slack App に files:read が必須。無いと HTML ログインページが返り adapter が
+	 *   NetworkError を投げる点に注意
+	 */
+	override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | undefined> {
+		const messenger = this.getMessengerContext() as
+			| { message?: { attachments?: AttachmentInput[] } }
+			| undefined;
+		const attachments = messenger?.message?.attachments;
+		if (!attachments || attachments.length === 0) {
+			return;
+		}
+
+		const { accepted, notices } = filterAttachments(attachments);
+
+		// 上限超過は Session に保存せず、スレッドへ1行で通知する
+		for (const notice of notices) {
+			try {
+				await this.deliverNotice(notice);
+			} catch {
+				// deliverNotice が解決できない場合（web チャンネル等）はログに残すだけ
+				logError("slack_attachment_notice_failed", notice);
+			}
+		}
+
+		if (accepted.length === 0) {
+			return;
+		}
+
+		// 許可された画像を取得し、Vision 用の file part へ変換する
+		const modelFileParts: Array<{
+			type: "file";
+			data: string;
+			mediaType: string;
+		}> = [];
+		const sessionFileParts: Array<{
+			type: "file";
+			mediaType: string;
+			url: string;
+			filename?: string;
+		}> = [];
+
+		for (const att of accepted) {
+			try {
+				const fetchFn =
+					(att as { fetch?: () => Promise<ArrayBuffer> }).fetch ??
+					(att as { fetchData?: () => Promise<Buffer | ArrayBuffer> })
+						.fetchData;
+				if (!fetchFn) {
+					continue;
+				}
+				const data = await fetchFn();
+				if (!data) {
+					continue;
+				}
+				const mime = (att.mediaType ?? att.mimeType ?? "") as string;
+				const dataUrl = toDataUrl(data as ArrayBuffer, mime);
+				modelFileParts.push({
+					type: "file",
+					data: dataUrl,
+					mediaType: mime,
+				});
+				sessionFileParts.push({
+					type: "file",
+					mediaType: mime,
+					url: dataUrl,
+					filename: att.name,
+				});
+			} catch (error) {
+				// files:read 無しで HTML が返ると adapter が NetworkError を投げる
+				logError(
+					"slack_attachment_fetch_failed",
+					"failed to fetch attachment",
+					{
+						error: String(error).slice(0, 500),
+						mimeType: att.mediaType ?? att.mimeType,
+						size: att.size,
+					},
+				);
+			}
+		}
+
+		if (modelFileParts.length === 0) {
+			return;
+		}
+
+		// 現在ターンのモデル入力へ file part を注入する
+		const messages = [...ctx.messages];
+		let lastUserIdx = -1;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			if ((messages[i] as { role: string }).role === "user") {
+				lastUserIdx = i;
+				break;
+			}
+		}
+		if (lastUserIdx === -1) {
+			return;
+		}
+		const last = messages[lastUserIdx] as unknown as {
+			role: string;
+			content: unknown;
+		};
+		if (typeof last.content === "string") {
+			(last as { content: unknown }).content = [
+				{ type: "text", text: last.content },
+				...modelFileParts,
+			];
+		} else if (Array.isArray(last.content)) {
+			(last as { content: unknown[] }).content = [
+				...(last.content as unknown[]),
+				...modelFileParts,
+			];
+		} else {
+			(last as { content: unknown }).content = [...modelFileParts];
+		}
+
+		// Session にも保存し、次ターン以降の履歴としてモデルへ渡るようにする。
+		// 本来は fetchMetadata.url を保存して再取得する想定だが、現実装では data URL を
+		// 保存することで Vision の履歴保持を実現する。ユーザーが Slack 上で削除した場合の
+		// 再取得失敗は ADR 0006 で許容されている。
+		try {
+			const leaf = await this.session.getLatestLeaf();
+			if (leaf && leaf.role === "user") {
+				const updatedParts = [...leaf.parts];
+				for (const p of sessionFileParts) {
+					updatedParts.push(p as unknown as (typeof leaf.parts)[number]);
+				}
+				await this.session.updateMessage({ ...leaf, parts: updatedParts });
+			}
+		} catch {
+			// Session 更新失敗はモデルへの送信を妨げない
+		}
+
+		return { messages: messages as TurnContext["messages"] };
 	}
 
 	/**
