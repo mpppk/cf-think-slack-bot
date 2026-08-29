@@ -1,5 +1,14 @@
+import { getAgentByName } from "agents";
 import { logError, logInfo } from "../observability/log";
 import { verifySlackSignature } from "./signature";
+
+/**
+ * ルートの Think エージェント(DO)の名前。Think は messenger ごとに1つの
+ * ルートが Chat SDK runtime を持ち、ChatSDK thread ごとに sub-agent
+ * (ThreadAgent) を生成する。名前は固定し、Slack の thread id (`slack:{channel}:{threadTs}`)
+ * と衝突しないものにする(ADR 0002)。
+ */
+const ROOT_AGENT_NAME = "root";
 
 /**
  * Slack Webhook の受け口。Slack App の Event Subscriptions に登録する URL
@@ -65,9 +74,28 @@ export async function handleSlackWebhook(
 	// このログだけ(botはまだ発言しないので Slack の画面には何も出ない)。
 	logInfo(OP, "イベントを受理した", describeEvent(payload, request));
 
-	// ここから先(イベントの配送・Think への受け渡し)は後続のPRで実装する。
-	// Slack は3秒で ack を要求するので、実装が入るまでも受理だけは返しておく。
-	return new Response(null, { status: 202 });
+	// 署名検証で request.text() により body を読み切っているため、同じ内容で
+	// Request を作り直して Think の messenger ルートへ渡す。
+	// Think は ChatSDK thread ごとに sub-agent を作る (conversation: "thread" 既定)
+	// ため、Slack Thread -> ChatSDK Thread -> Thread Agent の束縛は Think 側で
+	// 保たれる(ADR 0002, ADR 0003)。
+	const forwardRequest = new Request(request.url, {
+		method: request.method,
+		headers: new Headers(request.headers),
+		body,
+	});
+
+	try {
+		const stub = await getAgentByName(env.THREAD_AGENT, ROOT_AGENT_NAME);
+		const response = await stub.fetch(forwardRequest);
+		logInfo(OP, "Thinkへ配送した", { status: response.status });
+		return response;
+	} catch (error) {
+		logError(OP, "Thinkへの配送に失敗した", {
+			error: String(error).slice(0, 500),
+		});
+		return new Response("Internal Server Error", { status: 500 });
+	}
 }
 
 /**

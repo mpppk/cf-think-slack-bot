@@ -122,6 +122,14 @@ export class SlackBot extends Think<Env> {
 			botToken: this.env.SLACK_BOT_TOKEN ?? "",
 			signingSecret:
 				this.env.SLACK_SIGNING_SECRET ?? "missing-placeholder-secret",
+			// workerd テストでは SLACK_BOT_TOKEN が未設定。botUserId 未指定だと
+			// adapter.initialize() が Slack API(auth.test)へネットワークしてハングする
+			// (ローカルの vitest は外部への fetch がタイムアウトまでブロックされる)。
+			// トークンが無い環境ではダミーを渡して API 呼び出しをスキップする。
+			// 本番/preview ではトークンが設定されるため undefined のままにし、実体を
+			// 取得させる。app_mention の isMention は event.type で判定されるため
+			// ダミーでも配送には影響しない。
+			...(this.env.SLACK_BOT_TOKEN ? {} : { botUserId: "U_test_dummy" }),
 		});
 
 		return {

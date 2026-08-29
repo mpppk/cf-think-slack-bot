@@ -80,13 +80,16 @@ describe(`POST ${SLACK_WEBHOOK_PATH}`, () => {
 		await expect(response.text()).resolves.toBe(challenge);
 	});
 
-	it("正しい署名のイベントを受理する(即ack)", async () => {
+	it("正しい署名のイベントを Think へ渡し 200 を返す(202スタブではない)", async () => {
 		const response = await dispatch(
 			await signedRequest({
 				type: "event_callback",
 				event: { type: "app_mention" },
 			}),
 		);
-		expect(response.status).toBe(202);
+		// 202 はスタブが固定していた値。Think の messenger 経由では 200 ok が返る。
+		// ここで 202 を期待すると、配線漏れを検出できない。
+		expect(response.status).toBe(200);
+		await expect(response.text()).resolves.toBe("ok");
 	});
 });
