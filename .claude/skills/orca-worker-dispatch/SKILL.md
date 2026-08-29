@@ -19,7 +19,7 @@ Orca orchestration で、**1人のコーディネーターがタスクDAGを複�
 
 ## 前提: worker-start は失敗する前提で組む
 
-**Orca + opencode の組み合わせでは `worker-start` が `agent_prompt_stalled` で失敗する。** 2026-08-29 の実測（Orca 1.4.191 / OpenCode 1.18.25）で、**9 dispatch 中 9 件が失敗、受理された `worker_done` は 0 件**だった。
+**Orca + opencode の組み合わせでは `worker-start` が `agent_prompt_stalled` で失敗する。** 2026-08-29 の実測（Orca 1.4.191 / OpenCode 1.18.25）で、**10 dispatch 中 10 件が失敗、受理された `worker_done` は 0 件**だった。
 
 ```json
 { "state": "failed", "stage": "dispatch_input", "lastError": "agent_prompt_stalled" }
@@ -27,23 +27,25 @@ Orca orchestration で、**1人のコーディネーターがタスクDAGを複�
 
 重要なのは、**壊れているのは Orca 側のライフサイクル管理だけで、worker は正常に spec を受け取り最後まで実装を完遂する**こと。失敗の瞬間に dispatch capability が revoke され、以降その worker からの `worker_done` / `heartbeat` / `escalation` は全て拒否される。
 
-有力な仮説は `--timeout-ms` の既定値60秒に対し、長い spec（1,000〜2,000字）を TUI へ流し込む描画が間に合っていないこと。**まず `--timeout-ms 180000` を試す。** これで直れば以下の回復手順は全部不要になる。
+**原因は未特定。`--timeout-ms` の延長では直らないと検証済み**（既定60秒 → 180000ms でも同様に失敗）。「長い spec の TUI 描画が60秒に間に合っていない」という仮説は否定されたので、**再試行して時間を使わないこと**。以下の回復手順を前提に組む。
 
 ## 起動
 
-### 自動承認フラグを付ける
+### 自動承認フラグは Orca の GUI 設定で渡す
 
 付けないと worker が権限確認プロンプトで停止し、コーディネーターが完了を待ち続けるデッドロックになる。**opencode に `--yolo` は無い。正しくは `--auto`。**
 
-`worker-start` は agent へカスタム引数を渡せない（`--model` / `--effort` のみ、しかも **opencode は `--model` 非対応**で `Agent opencode does not support launch-time model selection.` になる）。自動承認が要るなら低レベル経路を使う:
+`worker-start` は agent へカスタム引数を渡せない（`--model` / `--effort` のみ、しかも **opencode は `--model` 非対応**で `Agent opencode does not support launch-time model selection.` になる）。**フラグは Orca の GUI 設定（agent のデフォルト引数）に入れておく。** CLI からは参照・変更できない。設定済みなら通常どおり起動してよい:
 
 ```bash
-orca terminal create --worktree active --title "<task-name>" --command "opencode --auto" --json
-orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
-orca orchestration worker-start --task <task_id> --terminal <handle> --json
+orca orchestration worker-start --task <task_id> --worktree current --agent opencode --json
 ```
 
-最後を `dispatch --inject` にすると supervised な worker_dispatches 行が作られず、`worker-release` によるターミナル自動クローズが効かなくなる。**supervision が要るなら `worker-start --terminal <handle>`** を使う。
+TUI のステータス行が `Build auto · ...` になっていれば効いている（未設定だと `Build · ...`）。
+
+**自分で `terminal create --command "opencode --auto"` してから `worker-start --terminal <handle>` に渡す形は避ける。** 自動承認は効くが、**Orca がそのターミナルを所有しないため `worker-release` が `retained` / `reason: "external_terminal"` を返して閉じられなくなる**（2026-08-29 に実際に踏み、`orca terminal close` で手動クローズした）。GUI 設定を使えば Orca がターミナルを作るので所有権を持ち、後始末が自動化できる。
+
+低レベル経路がどうしても要る場合でも、`dispatch --inject` は supervised な worker_dispatches 行を作らないので使わない。**supervision が要るなら `worker-start --terminal <handle>`** を使う。
 
 ### spec に必ず入れる項目
 
@@ -113,9 +115,12 @@ Monitor で20秒間隔にポーリングし、`payload | fromjson | .taskId` で
 orca orchestration worker-release --dispatch <dispatch_id> --json
 ```
 
-`state: "released" / processAction: "closed_agent_terminal"` なら成功。ただし **`state: "retained" / reason: "user_takeover"` を返して閉じられないことがある**（2026-08-29 は 9 件中 4 件がこれ。条件は未特定）。
+`state: "released" / processAction: "closed_agent_terminal"` なら成功。閉じられない場合は `reason` で対応を変える:
 
-その場合は `terminal close` で代替しない。**閉じられなかった旨とタブ名をユーザーに伝えて手動クローズを依頼する。**
+| reason | 意味 | 対応 |
+|---|---|---|
+| `user_takeover` | 人が触っている可能性がある | **`terminal close` で代替しない。** タブ名を伝えてユーザーに手動クローズを依頼する（2026-08-29 は 9 件中 4 件がこれ。条件は未特定） |
+| `external_terminal` | コーディネーター自身が `terminal create` で作ったのでOrcaが所有していない | 人は触っていないので `orca terminal close --terminal <handle> --json` で自分で閉じてよい。そもそもこれを避けるため、起動はGUI設定＋`--agent`に寄せる |
 
 ## 同一worktreeで並列させるとき
 
