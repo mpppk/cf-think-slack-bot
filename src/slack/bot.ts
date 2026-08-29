@@ -17,7 +17,7 @@ import {
 	filterAttachments,
 	toDataUrl,
 } from "./attachment";
-import { installAxiosWorkerdPatch } from "./axios-workerd-patch";
+import { installWorkerdCachePatch } from "./workerd-cache-patch";
 import { classifyFailure, formatFailureNotice } from "./failure-notice";
 import {
 	installMessengerPatch,
@@ -27,9 +27,9 @@ import {
 // 生成失敗時の投稿を allowlist へ差し替えるパッチを workerd 起動時に当てる（ADR 0009）
 installMessengerPatch();
 
-// axios の fetch アダプタが cache: "default" を付けるせいで Slack API 呼び出しが
-// workerd で必ず失敗する。adapter が作られる前に既定値を上書きしておく。
-installAxiosWorkerdPatch();
+// axios(@slack/web-api 経由)が cache: "default" を付けるせいで Slack API 呼び出しが
+// workerd で必ず失敗する。adapter が作られる前にグローバルを差し替えておく。
+installWorkerdCachePatch();
 
 /**
  * compaction の閾値。
