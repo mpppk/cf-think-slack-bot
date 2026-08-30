@@ -18,6 +18,7 @@ import {
 	toDataUrl,
 } from "./attachment";
 import { classifyFailure, formatFailureNotice } from "./failure-notice";
+import { fetchSlackFile, SlackFileMissingScopeError } from "./fetch-slack-file";
 import {
 	installMessengerPatch,
 	setPendingFailureNotice,
@@ -162,7 +163,7 @@ export class SlackBot extends Think<Env> {
 	}
 
 	/**
-	 * 添付のダウンロード関数を解決する（仕様§3.4）。
+	 * 添付のダウンロード関数を解決する（仕様§3.4, ADR 0021 の例外）。
 	 *
 	 * **Think は Chat SDK thread ごとに sub-agent を作るため、イベントは
 	 * Durable Object をまたいでシリアライズされる。** そのとき `fetch` /
@@ -170,16 +171,24 @@ export class SlackBot extends Think<Env> {
 	 * （Slack ならファイルURLとteamId）だけが残る。MessengerAttachment の
 	 * 型定義にもそう明記されている。
 	 *
-	 * 復元は adapter の `rehydrateAttachment()` に委譲する。これが
-	 * `fetchMetadata.url` とトークン解決から `fetchData()` を組み直してくれる
-	 * （ADR 0021: Slack固有の事情は adapter に委譲する）。
+	 * 旧実装は adapter の `rehydrateAttachment()` に委譲していたが、
+	 * `@chat-adapter/shared` の downloadAttachment() が node:dns / node:https /
+	 * node:zlib / node:stream に依存し workerd では原理的に動かない
+	 * （NetworkError: Failed to fetch Slack file）ため、素の fetch で自前実装する
+	 * （fetch-slack-file.ts）。ただし `fetchMetadata.url` からの復元という筋は保つ。
+	 *
+	 * 768ab1e の対処（DOホップで fetch が失われる）を維持するため、fetch が無い
+	 * 場合は fetchMetadata.url から組み直す。9a96b0f の対処（teamId を落として
+	 * 静的 SLACK_BOT_TOKEN へフォールバック）も維持するが、fetch-slack-file が
+	 * teamId を使わず静的 token で取得するため、フィルタ自体は不要になっている。
+	 * 念のため url の有無だけを見る。
 	 *
 	 * 直接 `att.fetch` だけを見て諦めると、**同一ターン内でしか画像を読めない**。
 	 * 実際それで preview の bot が画像を黙って無視していた。
 	 */
 	private resolveAttachmentFetch(
 		att: AttachmentInput,
-	): (() => Promise<ArrayBuffer | Buffer>) | undefined {
+	): (() => Promise<ArrayBuffer | Buffer | Uint8Array>) | undefined {
 		const direct =
 			(att as { fetch?: () => Promise<ArrayBuffer> }).fetch ??
 			(att as { fetchData?: () => Promise<Buffer | ArrayBuffer> }).fetchData;
@@ -188,59 +197,43 @@ export class SlackBot extends Think<Env> {
 		}
 
 		// シリアライズを跨いだ後。fetchMetadata から取得手段を組み直す。
-		//
-		// このとき `teamId` / `enterpriseId` を残したままにすると、adapter は
-		// **マルチワークスペース配布用の経路**に入り `resolveTokenForTeam()` で
-		// インストール情報ストアを引きに行く。OAuth配布をしていないこの構成には
-		// ストアが無いので `AuthenticationError: Installation not found for team ...`
-		// になる（実際に踏んだ）。
-		//
-		// これらを落とすと adapter は `getToken()`（= 静的な SLACK_BOT_TOKEN）へ
-		// フォールバックする。単一ワークスペース前提（仕様§4.2）なのでそれで正しい。
-		// 他ワークスペースへ配布する場合はここを見直し、インストール情報ストアを持つこと。
 		const meta = (att as { fetchMetadata?: Record<string, string> })
 			.fetchMetadata;
-		const singleWorkspaceAtt = meta
-			? {
-					...att,
-					fetchMetadata: Object.fromEntries(
-						Object.entries(meta).filter(
-							([key]) =>
-								key !== "teamId" &&
-								key !== "enterpriseId" &&
-								key !== "isEnterpriseInstall",
-						),
-					),
-				}
-			: att;
-
-		try {
-			const rehydrated = this.getSlackAdapter().rehydrateAttachment(
-				singleWorkspaceAtt as never,
-			) as {
-				fetch?: () => Promise<ArrayBuffer>;
-				fetchData?: () => Promise<Buffer | ArrayBuffer>;
-			};
-			return rehydrated.fetchData ?? rehydrated.fetch;
-		} catch (error) {
+		const urlFromMeta = meta?.url;
+		// 旧来は teamId / enterpriseId を落として rehydrate していたが、自前実装では
+		// teamId を使わず静的 token で取得するため不要。url があればそれで取得する。
+		// 単一ワークスペース前提（仕様§4.2）は維持する。
+		const url = urlFromMeta ?? (att as { url?: string }).url;
+		if (!url) {
 			logError("slack_attachment_rehydrate_failed", "添付の復元に失敗した", {
-				error: String(error).slice(0, 500),
+				error: "missing url in attachment",
 			});
 			return undefined;
 		}
+
+		// 自前の fetch 実装を返す。bot token は Env から取る。
+		// workerd テストでは env が無い場合もあるため、そのときは空文字で呼び出し、
+		// fetchSlackFile 側でホスト検証が先に走る。
+		const token = this.env.SLACK_BOT_TOKEN ?? "";
+		return async () => {
+			const data = await fetchSlackFile(url, token);
+			return data;
+		};
 	}
 
 	/**
-	 * 画像添付の受け取りと上限超過時の通知（仕様§3.4, ADR 0006）。
+	 * 画像添付の受け取りと上限超過時の通知（仕様§3.4, ADR 0006, ADR 0021 の例外）。
 	 *
 	 * - jpeg / png / webp、1枚10MB以下、1メッセージ4枚までを Vision でモデルへ渡す
 	 * - 非画像・5枚目以降・10MB超は Session に保存せず、日本語1行で通知する
-	 * - 取得は attachment.fetchData() / attachment.fetch() に委譲する。Session には
-	 *   fetchMetadata.url を残し、過去ターンの画像は必要時に再取得する想定だが、
-	 *   現実装では data URL を Session に保存し、次ターン以降も履歴としてモデルへ渡る。
-	 *   ユーザーが Slack 上でファイルを削除した際の再取得失敗は許容する（ADR 0006）。
-	 * - Slack App に files:read が必須。無いと HTML ログインページが返り adapter が
-	 *   NetworkError を投げる点に注意
+	 * - 取得は attachment.fetch / fetchData が残っていれば委譲し、DOホップで失われた
+	 *   場合は fetchMetadata.url から fetchSlackFile（素の fetch）で再取得する。
+	 *   Session には fetchMetadata.url を残し、過去ターンの画像は必要時に再取得する
+	 *   想定だが、現実装では data URL を Session に保存し、次ターン以降も履歴として
+	 *   モデルへ渡る。ユーザーが Slack 上でファイルを削除した際の再取得失敗は許容する（ADR 0006）。
+	 * - Slack App に files:read が必須。無いと HTML ログインページが返り
+	 *   SlackFileMissingScopeError を投げ、slack_attachment_missing_scope として
+	 *   ログに残す（adapter と同じ判定）
 	 */
 	override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | undefined> {
 		const messenger = this.getMessengerContext() as
@@ -316,16 +309,29 @@ export class SlackBot extends Think<Env> {
 					filename: att.name,
 				});
 			} catch (error) {
-				// files:read 無しで HTML が返ると adapter が NetworkError を投げる
-				logError(
-					"slack_attachment_fetch_failed",
-					"failed to fetch attachment",
-					{
-						error: String(error).slice(0, 500),
-						mimeType: att.mediaType ?? att.mimeType,
-						size: att.size,
-					},
-				);
+				// files:read 無しで HTML が返ると NetworkError 相当を投げる。
+				// 汎用エラーと区別できる専用ログとして残す（adapter と同じ判定）。
+				if (error instanceof SlackFileMissingScopeError) {
+					logError(
+						"slack_attachment_missing_scope",
+						"files:read scope is missing",
+						{
+							error: String(error).slice(0, 500),
+							mimeType: att.mediaType ?? att.mimeType,
+							size: att.size,
+						},
+					);
+				} else {
+					logError(
+						"slack_attachment_fetch_failed",
+						"failed to fetch attachment",
+						{
+							error: String(error).slice(0, 500),
+							mimeType: att.mediaType ?? att.mimeType,
+							size: att.size,
+						},
+					);
+				}
 			}
 		}
 
