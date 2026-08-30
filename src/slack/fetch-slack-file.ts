@@ -169,9 +169,9 @@ export async function fetchSlackFile(
 			if (signal?.aborted) {
 				throw new SlackFileFetchError("Timed out fetching the attachment");
 			}
-			throw new SlackFileFetchError(
-				`Failed to fetch Slack file: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			const raw = error instanceof Error ? error.message : String(error);
+			const sanitized = raw.replace(/https?:\/\/\S+/g, "<url>");
+			throw new SlackFileFetchError(`Failed to fetch Slack file: ${sanitized}`);
 		}
 
 		// リダイレクトは手動で追う

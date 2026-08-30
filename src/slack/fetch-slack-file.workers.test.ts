@@ -6,6 +6,7 @@ import {
 	isAllowedSlackHost,
 	isTrustedSlackOrigin,
 	SLACK_ALLOWED_HOSTS,
+	SlackFileFetchError,
 	SlackFileMissingScopeError,
 	SlackFileTooLargeError,
 	SlackFileTooManyRedirectsError,
@@ -343,6 +344,30 @@ describe("fetch-slack-file: fetchSlackFile の保護", () => {
 			},
 		);
 		expect(data.length).toBe(2);
+	});
+
+	it("fetch 失敗時のメッセージから URL を除去する（ログにファイル名が載らない）", async () => {
+		const fetchMock = vi.fn(async () => {
+			throw new TypeError(
+				"Fetch API cannot load: https://files.slack.com/files-pri/T1-F1/secret.png",
+			);
+		});
+		let error: unknown;
+		try {
+			await fetchSlackFile("https://files.slack.com/file.jpg", "xoxb-test", {
+				fetchImpl: fetchMock as unknown as typeof fetch,
+			});
+		} catch (e) {
+			error = e;
+		}
+		expect(error).toBeInstanceOf(SlackFileFetchError);
+		const message = String((error as Error).message);
+		// URL とファイル名が消え、<url> に置換されている
+		expect(message).not.toContain("https://");
+		expect(message).not.toContain("secret.png");
+		expect(message).not.toContain("files-pri");
+		expect(message).toContain("<url>");
+		expect(message).toContain("Failed to fetch Slack file");
 	});
 });
 
