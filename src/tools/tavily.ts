@@ -1,6 +1,10 @@
 import type { ToolSet } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
+import { logError, logInfo } from "../observability/log";
+
+/** この経路のログに付く `op`。`wrangler tail --search` で絞るためのキー。 */
+const OP = "tavily_search";
 
 /**
  * Tavily Search API のレスポンス（必要なフィールドのみ）。
@@ -71,7 +75,19 @@ export function createTavilyTools(options: { apiKey?: string }): ToolSet {
 				includeAnswer,
 				timeRange,
 			}) => {
+				// 呼ばれたことを必ず残す。ログが無いと「モデルが検索を選ばなかった」のか
+				// 「呼ばれたが失敗した」のかが外から区別できない(実際に判別できず調査が止まった)。
+				// **クエリ本文は載せない。** 会話の中身が Workers Logs に残り続けるため、
+				// webhook のイベントログと同じ方針にする(仕様§「本文とファイルURLは載せない」)。
+				logInfo(OP, "tavily_search を実行する", {
+					queryLength: query.length,
+					maxResults: maxResults ?? 5,
+					searchDepth: searchDepth ?? "basic",
+					timeRange,
+				});
+
 				if (!apiKey) {
+					logError(OP, "TAVILY_API_KEY が未設定のため検索できない");
 					return {
 						ok: false,
 						error:
@@ -119,6 +135,10 @@ export function createTavilyTools(options: { apiKey?: string }): ToolSet {
 						const message = detail
 							? `${res.status} ${detail}`
 							: `HTTP ${res.status}`;
+						logError(OP, "Tavily API がエラーを返した", {
+							status: res.status,
+							detail: message.slice(0, 300),
+						});
 						return {
 							ok: false,
 							error: `Tavily search failed: ${message}`,
@@ -146,9 +166,17 @@ export function createTavilyTools(options: { apiKey?: string }): ToolSet {
 					if (data.answer) {
 						out.answer = data.answer;
 					}
+					logInfo(OP, "tavily_search が完了した", {
+						resultCount: results.length,
+						responseTime: data.response_time,
+						hasAnswer: Boolean(data.answer),
+					});
 					return out;
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
+					logError(OP, "Tavily への接続に失敗した", {
+						error: message.slice(0, 300),
+					});
 					return {
 						ok: false,
 						error: `Tavily search request failed: ${message}`,
