@@ -187,10 +187,36 @@ export class SlackBot extends Think<Env> {
 			return direct;
 		}
 
-		// シリアライズを跨いだ後。fetchMetadata から取得手段を組み直す
+		// シリアライズを跨いだ後。fetchMetadata から取得手段を組み直す。
+		//
+		// このとき `teamId` / `enterpriseId` を残したままにすると、adapter は
+		// **マルチワークスペース配布用の経路**に入り `resolveTokenForTeam()` で
+		// インストール情報ストアを引きに行く。OAuth配布をしていないこの構成には
+		// ストアが無いので `AuthenticationError: Installation not found for team ...`
+		// になる（実際に踏んだ）。
+		//
+		// これらを落とすと adapter は `getToken()`（= 静的な SLACK_BOT_TOKEN）へ
+		// フォールバックする。単一ワークスペース前提（仕様§4.2）なのでそれで正しい。
+		// 他ワークスペースへ配布する場合はここを見直し、インストール情報ストアを持つこと。
+		const meta = (att as { fetchMetadata?: Record<string, string> })
+			.fetchMetadata;
+		const singleWorkspaceAtt = meta
+			? {
+					...att,
+					fetchMetadata: Object.fromEntries(
+						Object.entries(meta).filter(
+							([key]) =>
+								key !== "teamId" &&
+								key !== "enterpriseId" &&
+								key !== "isEnterpriseInstall",
+						),
+					),
+				}
+			: att;
+
 		try {
 			const rehydrated = this.getSlackAdapter().rehydrateAttachment(
-				att as never,
+				singleWorkspaceAtt as never,
 			) as {
 				fetch?: () => Promise<ArrayBuffer>;
 				fetchData?: () => Promise<Buffer | ArrayBuffer>;
