@@ -24,5 +24,11 @@ export default defineConfig({
 		// (=「書いたのに走っていない」に気付けない)ことは
 		// `bun run check:conventions` が防ぐ。
 		include: ["src/**/*.workers.test.ts"],
+		// Think のスタック(DO + messenger runtime)を初めて起動するテストは
+		// コールドスタートに数秒かかる。同一ファイル内で 5000ms -> 1400ms -> 数十ms と
+		// 逓減するのが観測されており、CI はローカルより遅いので既定の5秒では落ちる。
+		// 遅いのはテスト環境の初期化であって、本番は waitUntil で即 ack するため
+		// この時間はユーザーを待たせない(仕様§4.1)。
+		testTimeout: 30_000,
 	},
 });

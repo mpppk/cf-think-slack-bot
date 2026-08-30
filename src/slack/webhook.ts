@@ -1,5 +1,22 @@
+import { getAgentByName } from "agents";
 import { logError, logInfo } from "../observability/log";
 import { verifySlackSignature } from "./signature";
+
+/**
+ * ルートの Think エージェント(DO)の名前。Think は messenger ごとに1つの
+ * ルートが Chat SDK runtime を持ち、ChatSDK thread ごとに sub-agent
+ * (ThreadAgent) を生成する。名前は固定し、Slack の thread id (`slack:{channel}:{threadTs}`)
+ * と衝突しないものにする(ADR 0002)。
+ */
+const ROOT_AGENT_NAME = "root";
+
+/**
+ * Think への配送を諦めるまでの時間。
+ *
+ * ハングしたまま invocation が終わらないと Workers Logs には何も出力されない
+ * (ログは呼び出し完了時にフラッシュされる)ため、必ず終わらせて記録を残す。
+ */
+const DISPATCH_TIMEOUT_MS = 25_000;
 
 /**
  * Slack Webhook の受け口。Slack App の Event Subscriptions に登録する URL
@@ -13,6 +30,7 @@ const OP = "slack_webhook";
 export async function handleSlackWebhook(
 	request: Request,
 	env: Env,
+	ctx?: ExecutionContext,
 ): Promise<Response> {
 	const signingSecret = env.SLACK_SIGNING_SECRET;
 	if (!signingSecret) {
@@ -65,9 +83,77 @@ export async function handleSlackWebhook(
 	// このログだけ(botはまだ発言しないので Slack の画面には何も出ない)。
 	logInfo(OP, "イベントを受理した", describeEvent(payload, request));
 
-	// ここから先(イベントの配送・Think への受け渡し)は後続のPRで実装する。
-	// Slack は3秒で ack を要求するので、実装が入るまでも受理だけは返しておく。
-	return new Response(null, { status: 202 });
+	// 署名検証で request.text() により body を読み切っているため、同じ内容で
+	// Request を作り直して Think の messenger ルートへ渡す。
+	// Think は ChatSDK thread ごとに sub-agent を作る (conversation: "thread" 既定)
+	// ため、Slack Thread -> ChatSDK Thread -> Thread Agent の束縛は Think 側で
+	// 保たれる(ADR 0002, ADR 0003)。
+	const forwardRequest = new Request(request.url, {
+		method: request.method,
+		headers: new Headers(request.headers),
+		body,
+	});
+
+	const dispatchToThink = async (): Promise<Response> => {
+		const stub = await getAgentByName(env.THREAD_AGENT, ROOT_AGENT_NAME);
+		return await stub.fetch(forwardRequest);
+	};
+
+	// 仕様§4.1: 即座に ack を返し、実処理は非同期で行う。
+	// Think の処理(LLM呼び出しを含む)を待つと3秒に間に合わずSlackがリトライし、
+	// 同じイベントが何度も配送される。ack は adapter ではなくここで返す。
+	if (ctx) {
+		ctx.waitUntil(
+			(async () => {
+				try {
+					const response = await withTimeout(
+						dispatchToThink(),
+						DISPATCH_TIMEOUT_MS,
+					);
+					logInfo(OP, "Thinkへ配送した", { status: response.status });
+				} catch (error) {
+					// タイムアウトを入れているのは、ハングしたまま invocation が終わらないと
+					// Workers Logs に何も出ず原因調査ができなくなるため。
+					logError(OP, "Thinkへの配送に失敗した", {
+						error: String(error).slice(0, 500),
+					});
+				}
+			})(),
+		);
+		return new Response(null, { status: 202 });
+	}
+
+	// ctx が無い経路(テスト)では同期的に配送し、Think の応答をそのまま返す。
+	// 202 を固定するとThinkへ届いているかを検証できなくなる。
+	try {
+		const response = await dispatchToThink();
+		logInfo(OP, "Thinkへ配送した", { status: response.status });
+		return response;
+	} catch (error) {
+		logError(OP, "Thinkへの配送に失敗した", {
+			error: String(error).slice(0, 500),
+		});
+		return new Response("Internal Server Error", { status: 500 });
+	}
+}
+
+/** `promise` が `ms` 以内に解決しなければ reject する。ハング時にログを残すため。 */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => {
+			reject(new Error(`think_dispatch_timeout after ${ms}ms`));
+		}, ms);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(error) => {
+				clearTimeout(timer);
+				reject(error);
+			},
+		);
+	});
 }
 
 /**

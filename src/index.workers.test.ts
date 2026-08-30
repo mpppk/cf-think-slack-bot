@@ -13,8 +13,36 @@ const BASE_URL = "https://cf-think-slack-bot.example.com";
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 type IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
+/**
+ * `waitUntil` に渡された処理を集める最小の ExecutionContext。
+ * 本番と同じ経路(ctx あり)を通しつつ、非同期配送の完了まで待てるようにする。
+ */
+function testExecutionContext(): {
+	ctx: ExecutionContext;
+	settled: () => Promise<void>;
+} {
+	const pending: Promise<unknown>[] = [];
+	const ctx = {
+		waitUntil(promise: Promise<unknown>) {
+			pending.push(promise);
+		},
+		passThroughOnException() {},
+	} as unknown as ExecutionContext;
+	return {
+		ctx,
+		settled: async () => {
+			await Promise.all(pending);
+		},
+	};
+}
+
 async function dispatch(request: IncomingRequest): Promise<Response> {
-	return await worker.fetch(request, env);
+	// 本番と同じ経路。ctx があると webhook は即 ack し、Think への配送は
+	// waitUntil の中で走る(仕様§4.1)。配送完了まで待ってから返す。
+	const { ctx, settled } = testExecutionContext();
+	const response = await worker.fetch(request, env, ctx);
+	await settled();
+	return response;
 }
 
 async function signedRequest(payload: unknown): Promise<IncomingRequest> {
@@ -80,13 +108,17 @@ describe(`POST ${SLACK_WEBHOOK_PATH}`, () => {
 		await expect(response.text()).resolves.toBe(challenge);
 	});
 
-	it("正しい署名のイベントを受理する(即ack)", async () => {
+	it("正しい署名のイベントに即 ack を返す(Thinkの完了を待たない)", async () => {
 		const response = await dispatch(
 			await signedRequest({
 				type: "event_callback",
 				event: { type: "app_mention" },
 			}),
 		);
+		// 仕様§4.1: 即座に ack を返し、実処理は非同期で行う。Think の処理(LLM呼び出し)を
+		// 待つと3秒に間に合わずSlackがリトライする。
+		// **この 202 は「Thinkへ渡していない」ことを意味しない。** 配線が生きていることは
+		// src/slack/webhook.workers.test.ts の「Think へ配送する」で別途検証している。
 		expect(response.status).toBe(202);
 	});
 });

@@ -1,4 +1,8 @@
-import { DurableObject } from "cloudflare:workers";
+// **この import は必ず先頭に置く。** axios(@slack/web-api 経由)はアダプタ生成時に
+// globalThis.Request を捕獲するため、@chat-adapter/slack を引き込む import より
+// 先に評価されないと workerd 非対応の cache 指定を落とせない。
+import "./slack/workerd-cache-patch";
+import { SlackBot } from "./slack/bot";
 import { handleSlackWebhook, SLACK_WEBHOOK_PATH } from "./slack/webhook";
 
 // **このファイルの named export は workerd が「エントリポイント宣言」として検証する**。
@@ -10,18 +14,22 @@ import { handleSlackWebhook, SLACK_WEBHOOK_PATH } from "./slack/webhook";
 // (実際に踏んだ。`bun run dev` とデプロイ後のスモークだけが検出できる形の壊れ方)
 //
 // ここから export してよいのは default のハンドラと Durable Object クラスだけ。
+export { ThinkMessengerStateAgent } from "@cloudflare/think/messengers";
 
 /**
  * Slack Thread ごとに1つ生成される隔離単位(docs/CONTEXT.md: Thread Agent)。
  * Think Session の永続と agentic loop の実行を担う。
  *
- * **中身はこれから**。ここに置いてあるのは、CI(workerd テスト・`wrangler deploy
- * --dry-run`)とデプロイ経路を実際に動かすための最小の骨格で、実装は後続のPRで入る。
+ * SlackBot（Think）を継承し、ChatSDK Thread（slack:{channel}:{thread_ts}）ごとに
+ * 1インスタンスが生成されることで Slack Thread -> ChatSDK Thread -> Thread Agent の
+ * 1:1:1束縛を実現する。ID組み立ては adapter の threadIdForMessageEvent / encodeThreadId
+ * に委譲し、自前で `thread_ts ?? ts` を再実装しない（ADR 0002）。
+ * Session を正典とし conversations.replies で再構築しない（ADR 0001）。
  */
-export class ThreadAgent extends DurableObject<Env> {}
+export class ThreadAgent extends SlackBot {}
 
 export default {
-	async fetch(request, env) {
+	async fetch(request, env, ctx) {
 		const url = new URL(request.url);
 
 		// デプロイ済み環境をスモークで叩くためのエンドポイント(scripts/smoke.sh)。
@@ -30,7 +38,7 @@ export default {
 		}
 
 		if (request.method === "POST" && url.pathname === SLACK_WEBHOOK_PATH) {
-			return handleSlackWebhook(request, env);
+			return handleSlackWebhook(request, env, ctx);
 		}
 
 		return new Response("Not Found", { status: 404 });

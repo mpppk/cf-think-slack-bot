@@ -24,7 +24,11 @@
 	// リネーム・削除も tombstone（`state`）として1箇所に現れるため、
 	// 破壊的変更をレビューと機械検査で捕まえやすい。
 	"exports": {
-		"ThreadAgent": { "type": "durable-object", "storage": "sqlite" }
+		"ThreadAgent": { "type": "durable-object", "storage": "sqlite" },
+		"ThinkMessengerStateAgent": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		}
 	},
 
 	"durable_objects": {

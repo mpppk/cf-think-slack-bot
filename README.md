@@ -9,13 +9,17 @@ Slack上で「最初だけ `@bot`、以降はスレッド内で自然に会話�
 ## Slack App
 
 - **ワークスペース**: `niboshiporipori.slack.com`。手動招待したチャンネルのみで動作し、DMは誰でも可
-- **App は2つ**: `cf-think-slack-bot`（production）と `cf-think-slack-bot-preview`（preview）。Slack App は Request URL を1つしか持てないため環境ごとに分ける（[ADR 0020](docs/adr/0020-two-environments-workers-dev.md)）。manifest はリポジトリ管理（[ADR 0023](docs/adr/0023-slack-app-manifest-in-repo.md)）
+- **App は2つ**: `cf-think-slack-bot`（production）と `cf-think-slack-bot-preview`（preview）。Slack App は Request URL を1つしか持てないうえ、Durable Object を持つ Worker には Cloudflare が per-version の preview URL を発行しないため、環境分離には App 単位の固定 Request URL が必要（[ADR 0020](docs/adr/0020-two-environments-workers-dev.md)）。manifest は [`manifests/production.json`](manifests/production.json) / [`manifests/preview.json`](manifests/preview.json) でリポジトリ管理する（[ADR 0023](docs/adr/0023-slack-app-manifest-in-repo.md)）。**manifest の適用は手動**（Slack 管理画面へ貼り付け or App Manifest API）で、リポジトリと Slack 側の実状態は自動同期しない。スコープを増やしたときは両方を更新すること
 - **表示名 / アイコン**: `cf-think-slack-bot`
+- **App Home の Messages タブ**: `messages_tab_enabled: true` かつ `messages_tab_read_only_enabled: false` が必要。**無いとDMの送信自体がSlackに弾かれ、Workerにイベントが届かない**（`bot_events` に `message.im` を入れていても届かない）
 - **bot_events**: `app_mention` / `message.channels` / `message.groups` / `message.im`
   - 編集・削除は独立したイベントではなく `message.*` の `subtype`（`message_changed` / `message_deleted`）として同じ購読で届く。ボットはこれらに追従しない（[ADR 0005](docs/adr/0005-no-edit-tracking.md)）
-- **OAuth スコープ**: 画像添付を読むために `files:read` が必要。無いとSlackがファイル本体ではなくHTMLのログインページを返す
+- **OAuth スコープ**:
+  - `files:read` — 画像添付を読むために必要。無いとSlackがファイル本体ではなくHTMLのログインページを返す
+  - `users:read` — chat-sdk が発言者名を引くために必要。無いと `missing_scope` で user info の取得に失敗し、チャンネルでの発言者ラベル（`名前: 本文`）が付かない（応答自体は続く）
+  - **スコープを増やしたらワークスペースへの再インストールが必要**（manifestの貼り付けだけでは反映されない）
 - **Agent messaging experience（`agent_view`）**: 使わない（[ADR 0002](docs/adr/0002-thread-identity-mapping.md)）
-- **Webhook URL**（Event Subscriptions の Request URL）: **アカウントサブドメイン `niboshi` を必ず含める**。`<worker名>.workers.dev` としてしまうと別のホスト名になり、Slack が「The server couldn't be reached」で弾く
+- **Webhook URL**（Event Subscriptions の Request URL）: **アカウントサブドメイン `niboshi` を必ず含める**。`<worker名>.workers.dev` としてしまうと別のホスト名になり、Slack が「The server couldn't be reached」で弾く。上記 manifest の `settings.event_subscriptions.request_url` と一致させること
   - production: `https://cf-think-slack-bot.niboshi.workers.dev/messengers/slack/webhook`
   - preview: `https://cf-think-slack-bot-preview.niboshi.workers.dev/messengers/slack/webhook`
 

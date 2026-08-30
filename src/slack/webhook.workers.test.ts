@@ -63,6 +63,19 @@ function lastRecord(spy: ReturnType<typeof vi.spyOn>): Record<string, unknown> {
 	return (call as unknown[])[0] as Record<string, unknown>;
 }
 
+/** `イベントを受理した` のログを探す。Think への配送ログが後に追加されたため lastRecord では届かない。 */
+function acceptedRecord(
+	spy: ReturnType<typeof vi.spyOn>,
+): Record<string, unknown> {
+	for (let i = spy.mock.calls.length - 1; i >= 0; i--) {
+		const rec = (spy.mock.calls[i] as unknown[])[0] as Record<string, unknown>;
+		if (rec.msg === "イベントを受理した") {
+			return rec;
+		}
+	}
+	throw new Error("イベントを受理した ログが見つかりません");
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -73,7 +86,7 @@ describe("受理したイベントのログ", () => {
 
 		await handleSlackWebhook(await signedRequest(APP_MENTION), env);
 
-		expect(lastRecord(info)).toMatchObject({
+		expect(acceptedRecord(info)).toMatchObject({
 			op: "slack_webhook",
 			payloadType: "event_callback",
 			eventId: "Ev0PV52K21",
@@ -92,7 +105,7 @@ describe("受理したイベントのログ", () => {
 
 		await handleSlackWebhook(await signedRequest(APP_MENTION), env);
 
-		expect(JSON.stringify(lastRecord(info))).not.toContain("こんにちは");
+		expect(JSON.stringify(acceptedRecord(info))).not.toContain("こんにちは");
 	});
 
 	it("来ていないフィールドはキーごと落とす", async () => {
@@ -108,7 +121,7 @@ describe("受理したイベントのログ", () => {
 
 		// DM にスレッドが無い場合など。`undefined` を載せると
 		// 「空で来た」のか「そもそも無い」のか読めなくなる。
-		expect(lastRecord(info)).not.toHaveProperty("threadTs");
+		expect(acceptedRecord(info)).not.toHaveProperty("threadTs");
 	});
 
 	it("リトライで再送されたことが分かる", async () => {
@@ -122,7 +135,7 @@ describe("受理したイベントのログ", () => {
 			env,
 		);
 
-		expect(lastRecord(info)).toMatchObject({
+		expect(acceptedRecord(info)).toMatchObject({
 			retryNum: "2",
 			retryReason: "http_timeout",
 		});
@@ -161,5 +174,22 @@ describe("弾いたリクエストのログ", () => {
 			hasTimestamp: false,
 			hasSignature: false,
 		});
+	});
+});
+
+describe("Think への配送", () => {
+	// ここが「配線が生きているか」を担保する唯一のテスト。
+	// Worker のエントリ経由(src/index.workers.test.ts)は仕様§4.1の即ackを検証するため
+	// 202 を返し、Think の応答を見られない。ctx を渡さない経路では同期配送になるので、
+	// Think が実際に処理したこと(200 ok)をここで確認する。
+	it("署名済みイベントを Think の messenger ルートへ渡し、その応答を返す", async () => {
+		const response = await handleSlackWebhook(
+			await signedRequest(APP_MENTION),
+			env,
+		);
+
+		// 202 はスタブが固定していた値。Think へ届いていれば messenger が 200 ok を返す。
+		expect(response.status).toBe(200);
+		await expect(response.text()).resolves.toBe("ok");
 	});
 });
