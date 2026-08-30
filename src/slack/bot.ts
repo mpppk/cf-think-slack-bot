@@ -122,8 +122,14 @@ export class SlackBot extends Think<Env> {
 		return createTavilyTools({ apiKey: this.env.TAVILY_API_KEY });
 	}
 
-	override getMessengers() {
-		const adapter = createSlackAdapter({
+	/**
+	 * Slack adapter。`beforeTurn` が `rehydrateAttachment()` を呼ぶために
+	 * 同じインスタンスを共有する必要があるので、生成をここに集約して保持する。
+	 */
+	private slackAdapter?: ReturnType<typeof createSlackAdapter>;
+
+	private getSlackAdapter(): ReturnType<typeof createSlackAdapter> {
+		this.slackAdapter ??= createSlackAdapter({
 			botToken: this.env.SLACK_BOT_TOKEN ?? "",
 			signingSecret:
 				this.env.SLACK_SIGNING_SECRET ?? "missing-placeholder-secret",
@@ -136,10 +142,13 @@ export class SlackBot extends Think<Env> {
 			// ダミーでも配送には影響しない。
 			...(this.env.SLACK_BOT_TOKEN ? {} : { botUserId: "U_test_dummy" }),
 		});
+		return this.slackAdapter;
+	}
 
+	override getMessengers() {
 		return {
 			slack: chatSdkMessenger({
-				adapter,
+				adapter: this.getSlackAdapter(),
 				provider: "slack",
 				userName: "cf-think-slack-bot",
 				respondTo: ["direct-message", "mention", "subscribed-thread"],
@@ -150,6 +159,49 @@ export class SlackBot extends Think<Env> {
 
 	override getSystemPrompt() {
 		return "あなたは丁寧な口調で応答するアシスタントです。Slackで読めるMarkdownで回答してください。";
+	}
+
+	/**
+	 * 添付のダウンロード関数を解決する（仕様§3.4）。
+	 *
+	 * **Think は Chat SDK thread ごとに sub-agent を作るため、イベントは
+	 * Durable Object をまたいでシリアライズされる。** そのとき `fetch` /
+	 * `data` / `raw` はクロージャやバイナリなので**失われ**、`fetchMetadata`
+	 * （Slack ならファイルURLとteamId）だけが残る。MessengerAttachment の
+	 * 型定義にもそう明記されている。
+	 *
+	 * 復元は adapter の `rehydrateAttachment()` に委譲する。これが
+	 * `fetchMetadata.url` とトークン解決から `fetchData()` を組み直してくれる
+	 * （ADR 0021: Slack固有の事情は adapter に委譲する）。
+	 *
+	 * 直接 `att.fetch` だけを見て諦めると、**同一ターン内でしか画像を読めない**。
+	 * 実際それで preview の bot が画像を黙って無視していた。
+	 */
+	private resolveAttachmentFetch(
+		att: AttachmentInput,
+	): (() => Promise<ArrayBuffer | Buffer>) | undefined {
+		const direct =
+			(att as { fetch?: () => Promise<ArrayBuffer> }).fetch ??
+			(att as { fetchData?: () => Promise<Buffer | ArrayBuffer> }).fetchData;
+		if (direct) {
+			return direct;
+		}
+
+		// シリアライズを跨いだ後。fetchMetadata から取得手段を組み直す
+		try {
+			const rehydrated = this.getSlackAdapter().rehydrateAttachment(
+				att as never,
+			) as {
+				fetch?: () => Promise<ArrayBuffer>;
+				fetchData?: () => Promise<Buffer | ArrayBuffer>;
+			};
+			return rehydrated.fetchData ?? rehydrated.fetch;
+		} catch (error) {
+			logError("slack_attachment_rehydrate_failed", "添付の復元に失敗した", {
+				error: String(error).slice(0, 500),
+			});
+			return undefined;
+		}
 	}
 
 	/**
@@ -204,11 +256,20 @@ export class SlackBot extends Think<Env> {
 
 		for (const att of accepted) {
 			try {
-				const fetchFn =
-					(att as { fetch?: () => Promise<ArrayBuffer> }).fetch ??
-					(att as { fetchData?: () => Promise<Buffer | ArrayBuffer> })
-						.fetchData;
+				const fetchFn = this.resolveAttachmentFetch(att);
 				if (!fetchFn) {
+					// 黙って捨てると「画像を無視する bot」にしか見えず原因が追えない
+					logError(
+						"slack_attachment_unfetchable",
+						"添付のダウンロード手段を解決できなかった",
+						{
+							mimeType: att.mediaType ?? att.mimeType,
+							hasFetchMetadata: Boolean(
+								(att as { fetchMetadata?: unknown }).fetchMetadata,
+							),
+							hasUrl: Boolean((att as { url?: unknown }).url),
+						},
+					);
 					continue;
 				}
 				const data = await fetchFn();
