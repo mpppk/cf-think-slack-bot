@@ -135,7 +135,14 @@ export async function fetchSlackFile(
 	const fetchImpl = options.fetchImpl ?? fetch;
 	const slackApiUrl = options.slackApiUrl;
 
-	let url = new URL(urlString);
+	let url: URL;
+	try {
+		url = new URL(urlString);
+	} catch {
+		throw new SlackFileFetchError(
+			"Refusing to fetch an untrusted attachment URL",
+		);
+	}
 	validateSlackUrl(url);
 
 	for (let hop = 0; hop <= maxRedirects; hop++) {
@@ -184,7 +191,14 @@ export async function fetchSlackFile(
 					"Too many attachment redirects",
 				);
 			}
-			const nextUrl = new URL(location, url.href);
+			let nextUrl: URL;
+			try {
+				nextUrl = new URL(location, url.href);
+			} catch {
+				throw new SlackFileFetchError(
+					"Refusing to fetch an untrusted attachment URL",
+				);
+			}
 			validateSlackUrl(nextUrl);
 			url = nextUrl;
 			continue;
@@ -209,7 +223,7 @@ export async function fetchSlackFile(
 				// ignore
 			}
 			throw new SlackFileMissingScopeError(
-				`Failed to download file from Slack: received HTML login page instead of file data. Ensure your Slack app has the "files:read" OAuth scope. URL: ${url.href}`,
+				`Failed to download file from Slack: received HTML login page instead of file data. Ensure your Slack app has the "files:read" OAuth scope.`,
 			);
 		}
 
